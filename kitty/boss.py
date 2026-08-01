@@ -1428,6 +1428,31 @@ class Boss:
         if tm := self.os_window_map.get(os_window_id):
             tm.handle_tab_bar_mouse(x, y, button, modifiers, action)
 
+    def _titlebar_tab_payload(self, payload: str) -> tuple['TabManager | None', Tab | None]:
+        try:
+            os_window_id, tab_id = map(int, payload.split())
+        except Exception:
+            return None, None
+        tm = self.os_window_map.get(os_window_id)
+        if tm is None:
+            return None, None
+        return tm, tm.tab_for_id(tab_id)
+
+    def titlebar_tab_activate(self, payload: str) -> None:
+        tm, tab = self._titlebar_tab_payload(payload)
+        if tm is not None and tab is not None:
+            tm.set_active_tab(tab)
+
+    def titlebar_tab_close(self, payload: str) -> None:
+        tm, tab = self._titlebar_tab_payload(payload)
+        if tm is not None and tab is not None:
+            self.close_tab(tab)
+
+    def titlebar_tab_new(self, payload: str) -> None:
+        tm, _ = self._titlebar_tab_payload(payload)
+        if tm is not None:
+            tm.new_tab()
+
     def start_tab_drag(self, os_window_id: int, window_id: int, pixels: bytes, width: int, height: int) -> None:
         if tm := self.os_window_map.get(os_window_id):
             tm.start_tab_drag(pixels, width, height)

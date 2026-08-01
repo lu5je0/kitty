@@ -3236,6 +3236,19 @@ Note that when using :ref:`auto_color_scheme` this option is overridden by the c
 )
 
 opt(
+    'macos_titlebar_tabs',
+    'no',
+    option_type='to_bool',
+    long_text="""
+Show the tab bar as native macOS tabs in the window titlebar, similar to
+WezTerm. When enabled, the normal in-terminal tab bar is hidden and tabs are
+drawn in the titlebar with close buttons and a new tab button. Note that this
+requires the titlebar to be visible, so it is incompatible with
+:opt:`hide_window_decorations`. macOS only.
+""",
+)
+
+opt(
     'macos_option_as_alt',
     'no',
     option_type='macos_option_as_alt',

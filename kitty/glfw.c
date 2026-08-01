@@ -2502,6 +2502,34 @@ cocoa_minimize_os_window(PyObject UNUSED *self, PyObject *args) {
 }
 
 static PyObject*
+cocoa_set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
+    unsigned long long os_window_id = 0;
+    PyObject *tabs;
+    if (!PyArg_ParseTuple(args, "KO!", &os_window_id, &PyTuple_Type, &tabs)) return NULL;
+#ifdef __APPLE__
+    OSWindow *w = os_window_for_id(os_window_id);
+    if (!w || !w->handle || w->is_layer_shell) Py_RETURN_NONE;
+    if (!glfwGetCocoaWindow) { PyErr_SetString(PyExc_RuntimeError, "Failed to load glfwGetCocoaWindow"); return NULL; }
+    void *window = glfwGetCocoaWindow(w->handle);
+    if (!window) Py_RETURN_NONE;
+    size_t count = PyTuple_GET_SIZE(tabs);
+    RAII_ALLOC(TitlebarTabInfo, tinfo, count ? calloc(count, sizeof(TitlebarTabInfo)) : NULL);
+    if (count && !tinfo) return PyErr_NoMemory();
+    for (size_t i = 0; i < count; i++) {
+        PyObject *t = PyTuple_GET_ITEM(tabs, i);
+        int is_active = 0, needs_attention = 0;
+        if (!PyArg_ParseTuple(t, "KsppII", &tinfo[i].tab_id, &tinfo[i].title, &is_active, &needs_attention, &tinfo[i].fg, &tinfo[i].bg)) return NULL;
+        tinfo[i].is_active = is_active; tinfo[i].needs_attention = needs_attention;
+    }
+    cocoa_update_titlebar_tabs(window, os_window_id, tinfo, count);
+#else
+    PyErr_SetString(PyExc_RuntimeError, "cocoa_set_titlebar_tabs() is only supported on macOS");
+    return NULL;
+#endif
+    Py_RETURN_NONE;
+}
+
+static PyObject*
 change_os_window_state(PyObject *self UNUSED, PyObject *args) {
     int state;
     id_type wid = 0;
@@ -3300,6 +3328,7 @@ static PyMethodDef module_methods[] = {
     METHODB(cocoa_hide_app, METH_NOARGS),
     METHODB(cocoa_hide_other_apps, METH_NOARGS),
     METHODB(cocoa_minimize_os_window, METH_VARARGS),
+    METHODB(cocoa_set_titlebar_tabs, METH_VARARGS),
     {"glfw_init", (PyCFunction)glfw_init, METH_VARARGS, ""},
     {"glfw_terminate", (PyCFunction)glfw_terminate, METH_NOARGS, ""},
     {"glfw_get_physical_dpi", (PyCFunction)glfw_get_physical_dpi, METH_NOARGS, ""},

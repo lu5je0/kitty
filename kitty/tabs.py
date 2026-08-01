@@ -17,7 +17,7 @@ from typing import Any, Concatenate, Deque, Literal, NamedTuple, Optional, Param
 from .borders import Border, Borders
 from .child import Child
 from .cli_stub import CLIOptions, SaveAsSessionOptions
-from .constants import appname
+from .constants import appname, is_macos
 from .fast_data_types import (
     GLFW_MOUSE_BUTTON_LEFT,
     GLFW_MOUSE_BUTTON_MIDDLE,
@@ -26,6 +26,7 @@ from .fast_data_types import (
     add_tab,
     attach_window,
     buffer_keys_in_window,
+    cocoa_set_titlebar_tabs,
     current_focused_os_window_id,
     detach_window,
     draw_single_line_of_text,
@@ -1198,7 +1199,8 @@ class TabManager:  # {{{
         self.recent_title_bar_mouse_events = MouseEvents()
         self.wm_name = wm_name
         self.args = args
-        self.tab_bar_hidden = get_options().tab_bar_style == 'hidden'
+        self.native_titlebar_tabs_shown = False
+        self.tab_bar_hidden = get_options().tab_bar_style == 'hidden' or self.use_native_titlebar_tabs
         self.tabs: list[Tab] = []
         self.active_tab_history: Deque[int] = deque()
         self.tab_bar = TabBar(self.os_window_id)
@@ -1319,9 +1321,36 @@ class TabManager:  # {{{
                 return w
         return None
 
+    @property
+    def use_native_titlebar_tabs(self) -> bool:
+        return is_macos and get_options().macos_titlebar_tabs
+
+    def update_native_titlebar_tabs(self) -> None:
+        if not is_macos:
+            return
+        if self.use_native_titlebar_tabs:
+            opts = get_options()
+            data = []
+            for t in self.tab_bar_data:
+                if t.tab_id <= 0:
+                    continue
+                if t.is_active:
+                    fg = t.active_fg if t.active_fg is not None else color_as_int(opts.active_tab_foreground)
+                    bg = t.active_bg if t.active_bg is not None else color_as_int(opts.active_tab_background)
+                else:
+                    fg = t.inactive_fg if t.inactive_fg is not None else color_as_int(opts.inactive_tab_foreground)
+                    bg = t.inactive_bg if t.inactive_bg is not None else color_as_int(opts.inactive_tab_background)
+                data.append((t.tab_id, t.title, t.is_active, t.needs_attention, fg, bg))
+            cocoa_set_titlebar_tabs(self.os_window_id, tuple(data))
+            self.native_titlebar_tabs_shown = True
+        elif self.native_titlebar_tabs_shown:
+            cocoa_set_titlebar_tabs(self.os_window_id, ())
+            self.native_titlebar_tabs_shown = False
+
     def mark_tab_bar_dirty(self) -> None:
         should_be_shown = not self.tab_bar_hidden and self.tab_bar_should_be_visible
         mark_tab_bar_dirty(self.os_window_id, should_be_shown)
+        self.update_native_titlebar_tabs()
         w = self.active_window or self.any_window
         if w is not None:
             data = {'tab_manager': self}
@@ -2127,8 +2156,9 @@ class TabManager:  # {{{
         at = self.active_tab
         for tab in self:
             tab.apply_options(at is tab)
-        self.tab_bar_hidden = get_options().tab_bar_style == 'hidden'
+        self.tab_bar_hidden = get_options().tab_bar_style == 'hidden' or self.use_native_titlebar_tabs
         self.tab_bar.apply_options()
         self.update_tab_bar_data()
+        self.update_native_titlebar_tabs()
         self.layout_tab_bar()
 # }}}

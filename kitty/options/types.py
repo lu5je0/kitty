@@ -397,6 +397,7 @@ option_names = (
     'macos_show_window_title_in',
     'macos_thicken_font',
     'macos_titlebar_color',
+    'macos_titlebar_tabs',
     'macos_traditional_fullscreen',
     'macos_use_physical_screen_frame',
     'macos_window_resizable',
@@ -613,6 +614,7 @@ class Options:
     macos_show_window_title_in: choices_for_macos_show_window_title_in = 'all'
     macos_thicken_font: float = 0
     macos_titlebar_color: int = 0
+    macos_titlebar_tabs: bool = False
     macos_traditional_fullscreen: bool = False
     macos_use_physical_screen_frame: bool = False
     macos_window_resizable: bool = True

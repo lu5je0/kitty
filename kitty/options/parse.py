@@ -1135,6 +1135,9 @@ class Parser:
     def macos_titlebar_color(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['macos_titlebar_color'] = macos_titlebar_color(val)
 
+    def macos_titlebar_tabs(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['macos_titlebar_tabs'] = to_bool(val)
+
     def macos_traditional_fullscreen(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['macos_traditional_fullscreen'] = to_bool(val)
 

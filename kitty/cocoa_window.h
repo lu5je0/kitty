@@ -43,9 +43,21 @@ typedef enum {
     COPY_OR_NOOP,
     USER_MENU_ACTION,
     COCOA_NOTIFICATION_UNTRACKED,
+    TITLEBAR_TAB_ACTIVATE,
+    TITLEBAR_TAB_CLOSE,
+    TITLEBAR_TAB_NEW,
 
     NUM_COCOA_PENDING_ACTIONS
 } CocoaPendingAction;
+
+typedef struct TitlebarTabInfo {
+    unsigned long long tab_id;
+    const char *title;
+    bool is_active;
+    bool needs_attention;
+    unsigned int fg, bg;  // 0xRRGGBB
+} TitlebarTabInfo;
+void cocoa_update_titlebar_tabs(void *w, unsigned long long os_window_id, const TitlebarTabInfo *tabs, size_t count);
 
 void cocoa_focus_window(void *w);
 long cocoa_window_number(void *w);

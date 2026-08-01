@@ -680,7 +680,7 @@ def kitty_env(args: Options) -> Env:
     lcms2 = pkg_config('lcms2', '--libs')
     ans.ldpaths += pylib + platform_libs + gl_libs + libpng + lcms2 + libcrypto_ldflags + xxhash[1]
     if is_macos:
-        ans.ldpaths.extend('-framework Cocoa'.split())
+        ans.ldpaths.extend('-framework Cocoa -framework QuartzCore'.split())
     elif not is_openbsd:
         ans.ldpaths += ['-lrt']
         if '-ldl' not in ans.ldpaths:
@@ -1733,6 +1733,8 @@ def macos_info_plist(for_quake: str = '') -> bytes:
         CFBundleIconFile=f'{appname}.icns',
         NSHighResolutionCapable=True,
         NSSupportsAutomaticGraphicsSwitching=True,
+        # Opt out of the macOS 26 Liquid Glass design (large window corner radius etc.)
+        UIDesignRequiresCompatibility=True,
         # Needed for dark mode in Mojave when linking against older SDKs
         NSRequiresAquaSystemAppearance='NO',
         # Document and URL Types

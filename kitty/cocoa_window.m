@@ -12,6 +12,7 @@
 #include <Availability.h>
 #include <Carbon/Carbon.h>
 #include <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #import <IOKit/IOKitLib.h>
 #include <UserNotifications/UserNotifications.h>
 #import <AudioToolbox/AudioServices.h>
@@ -1389,6 +1390,446 @@ cocoa_show_progress_bar_on_dock_icon(PyObject *self UNUSED, PyObject *args) {
     [dockTile display];
     Py_RETURN_NONE;
 }
+// }}}
+
+// Titlebar tab bar {{{
+
+#define TITLEBAR_TABS_IDENTIFIER @"kitty-titlebar-tabs"
+static const CGFloat kTabMaxWidth = 200.0, kTabMinWidth = 60.0, kTabHeight = 24.0, kTabSpacing = 4.0, kTabCornerRadius = 6.0;
+static const CGFloat kTabBarLeftMargin = 84.0;  // clear the traffic light buttons
+static const CGFloat kNewTabButtonWidth = 28.0;
+static const NSTimeInterval kTabAnimationDuration = 0.18;
+
+static NSColor*
+titlebar_tab_color_from_rgb(unsigned int c) {
+    return [NSColor colorWithSRGBRed:((c >> 16) & 0xff) / 255.0 green:((c >> 8) & 0xff) / 255.0 blue:(c & 0xff) / 255.0 alpha:1.0];
+}
+
+@interface KittyTitlebarTabView : NSView {
+    NSTrackingArea *tracking_area;
+}
+@property (nonatomic) unsigned long long tab_id;
+@property (nonatomic) unsigned long long os_window_id;
+@property (nonatomic) BOOL is_active;
+@property (nonatomic) BOOL needs_attention;
+@property (nonatomic) BOOL hovered;
+@property (nonatomic) BOOL close_hovered;
+@property (nonatomic) BOOL marked_for_removal;
+@property (nonatomic) unsigned int fg_rgb;
+@property (nonatomic) unsigned int bg_rgb;
+@property (nonatomic, retain) NSTextField *titleField;
+@end
+
+@implementation KittyTitlebarTabView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = kTabCornerRadius;
+        self.layer.masksToBounds = YES;
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSZeroRect];
+        tf.editable = NO; tf.selectable = NO; tf.bordered = NO; tf.bezeled = NO;
+        tf.drawsBackground = NO;
+        tf.font = [NSFont systemFontOfSize:12];
+        tf.lineBreakMode = NSLineBreakByTruncatingTail;
+        tf.alignment = NSTextAlignmentCenter;
+        self.titleField = tf;
+        [self addSubview:tf];
+        [tf release];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (tracking_area) { [self removeTrackingArea:tracking_area]; [tracking_area release]; tracking_area = nil; }
+    self.titleField = nil;
+    [super dealloc];
+}
+
+- (NSRect)closeButtonRect {
+    return NSMakeRect(self.bounds.size.width - 20, (self.bounds.size.height - 14) / 2, 14, 14);
+}
+
+- (void)updateTrackingAreas {
+    if (tracking_area) { [self removeTrackingArea:tracking_area]; [tracking_area release]; }
+    tracking_area = [[NSTrackingArea alloc] initWithRect:self.bounds
+        options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways
+        owner:self userInfo:nil];
+    [self addTrackingArea:tracking_area];
+    [super updateTrackingAreas];
+}
+
+- (void)applyColorsAnimated:(BOOL)animated {
+    NSColor *bg = titlebar_tab_color_from_rgb(self.bg_rgb);
+    NSColor *fg = titlebar_tab_color_from_rgb(self.fg_rgb);
+    if (self.hovered && !self.is_active) {
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        [bg getRed:&r green:&g blue:&b alpha:&a];
+        const CGFloat luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        NSColor *toward = luminance < 0.5 ? [NSColor whiteColor] : [NSColor blackColor];
+        bg = [bg blendedColorWithFraction:0.08 ofColor:toward];
+    }
+    if (self.needs_attention && !self.is_active) fg = [NSColor systemOrangeColor];
+    if (animated) {
+        CABasicAnimation *anim = [CABasicAnimation animationWithKeyPath:@"backgroundColor"];
+        anim.duration = kTabAnimationDuration;
+        anim.fromValue = (id)(self.layer.backgroundColor ? self.layer.backgroundColor : [NSColor clearColor].CGColor);
+        anim.toValue = (id)bg.CGColor;
+        [self.layer addAnimation:anim forKey:@"bgcolor"];
+    }
+    self.layer.backgroundColor = bg.CGColor;
+    self.titleField.textColor = fg;
+    self.titleField.font = self.is_active ? [NSFont boldSystemFontOfSize:12] : [NSFont systemFontOfSize:12];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self applyColorsAnimated:NO];
+}
+
+- (void)layout {
+    [super layout];
+    self.titleField.frame = NSMakeRect(8, (self.bounds.size.height - 16) / 2 - 1, MAX(0, self.bounds.size.width - 8 - 22), 16);
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    NSRect cr = [self closeButtonRect];
+    NSColor *fg = titlebar_tab_color_from_rgb(self.fg_rgb);
+    if (self.close_hovered) {
+        [[fg colorWithAlphaComponent:0.25] setFill];
+        [[NSBezierPath bezierPathWithOvalInRect:cr] fill];
+    }
+    NSColor *xcolor = self.close_hovered ? fg : [fg colorWithAlphaComponent:0.6];
+    [xcolor setStroke];
+    NSBezierPath *p = [NSBezierPath bezierPath];
+    p.lineWidth = 1.2;
+    const CGFloat inset = 4.25;
+    [p moveToPoint:NSMakePoint(NSMinX(cr) + inset, NSMinY(cr) + inset)];
+    [p lineToPoint:NSMakePoint(NSMaxX(cr) - inset, NSMaxY(cr) - inset)];
+    [p moveToPoint:NSMakePoint(NSMaxX(cr) - inset, NSMinY(cr) + inset)];
+    [p lineToPoint:NSMakePoint(NSMinX(cr) + inset, NSMaxY(cr) - inset)];
+    [p stroke];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    (void)event;
+    self.hovered = YES;
+    [self applyColorsAnimated:YES];
+    self.needsLayout = YES;
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    (void)event;
+    self.hovered = NO; self.close_hovered = NO;
+    [self applyColorsAnimated:YES];
+    self.needsLayout = YES;
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint pos = [self convertPoint:event.locationInWindow fromView:nil];
+    BOOL over_close = NSPointInRect(pos, NSInsetRect([self closeButtonRect], -2, -2));
+    if (over_close != self.close_hovered) {
+        self.close_hovered = over_close;
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)sendAction:(CocoaPendingAction)action {
+    char payload[128];
+    snprintf(payload, sizeof(payload), "%llu %llu", self.os_window_id, self.tab_id);
+    set_cocoa_pending_action(action, payload);
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (void)mouseDown:(NSEvent *)event { (void)event; }
+
+- (void)mouseUp:(NSEvent *)event {
+    if (self.marked_for_removal) return;
+    NSPoint pos = [self convertPoint:event.locationInWindow fromView:nil];
+    if (!NSPointInRect(pos, self.bounds)) return;
+    if (NSPointInRect(pos, NSInsetRect([self closeButtonRect], -2, -2))) {
+        [self sendAction:TITLEBAR_TAB_CLOSE];
+    } else {
+        [self sendAction:TITLEBAR_TAB_ACTIVATE];
+    }
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    if (event.buttonNumber == 2) [self sendAction:TITLEBAR_TAB_CLOSE];
+}
+
+@end
+
+@interface KittyTitlebarNewTabButton : NSView {
+    NSTrackingArea *tracking_area;
+}
+@property (nonatomic) unsigned long long os_window_id;
+@property (nonatomic) BOOL hovered;
+@end
+
+@implementation KittyTitlebarNewTabButton
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = kTabCornerRadius;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (tracking_area) { [self removeTrackingArea:tracking_area]; [tracking_area release]; tracking_area = nil; }
+    [super dealloc];
+}
+
+- (void)updateTrackingAreas {
+    if (tracking_area) { [self removeTrackingArea:tracking_area]; [tracking_area release]; }
+    tracking_area = [[NSTrackingArea alloc] initWithRect:self.bounds
+        options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways owner:self userInfo:nil];
+    [self addTrackingArea:tracking_area];
+    [super updateTrackingAreas];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    BOOL dark = NO;
+    NSAppearanceName name = [self.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    dark = [name isEqualToString:NSAppearanceNameDarkAqua];
+    if (self.hovered) {
+        NSColor *bg = dark ? [NSColor colorWithWhite:1.0 alpha:0.12] : [NSColor colorWithWhite:0.0 alpha:0.08];
+        [bg setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:kTabCornerRadius yRadius:kTabCornerRadius] fill];
+    }
+    [[NSColor secondaryLabelColor] setStroke];
+    NSBezierPath *p = [NSBezierPath bezierPath];
+    p.lineWidth = 1.2;
+    NSPoint c = NSMakePoint(NSMidX(self.bounds), NSMidY(self.bounds));
+    const CGFloat arm = 5.0;
+    [p moveToPoint:NSMakePoint(c.x - arm, c.y)];
+    [p lineToPoint:NSMakePoint(c.x + arm, c.y)];
+    [p moveToPoint:NSMakePoint(c.x, c.y - arm)];
+    [p lineToPoint:NSMakePoint(c.x, c.y + arm)];
+    [p stroke];
+}
+
+- (void)mouseEntered:(NSEvent *)event { (void)event; self.hovered = YES; [self setNeedsDisplay:YES]; }
+- (void)mouseExited:(NSEvent *)event { (void)event; self.hovered = NO; [self setNeedsDisplay:YES]; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (void)mouseDown:(NSEvent *)event { (void)event; }
+
+- (void)mouseUp:(NSEvent *)event {
+    NSPoint pos = [self convertPoint:event.locationInWindow fromView:nil];
+    if (!NSPointInRect(pos, self.bounds)) return;
+    char payload[64];
+    snprintf(payload, sizeof(payload), "%llu 0", self.os_window_id);
+    set_cocoa_pending_action(TITLEBAR_TAB_NEW, payload);
+}
+
+@end
+
+@interface KittyTitlebarTabBarView : NSView
+@property (nonatomic) unsigned long long os_window_id;
+@property (nonatomic, retain) KittyTitlebarNewTabButton *plusButton;
+@end
+
+@implementation KittyTitlebarTabBarView
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.identifier = TITLEBAR_TABS_IDENTIFIER;
+        KittyTitlebarNewTabButton *b = [[KittyTitlebarNewTabButton alloc] initWithFrame:NSZeroRect];
+        self.plusButton = b;
+        [self addSubview:b];
+        [b release];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    self.plusButton = nil;
+    [super dealloc];
+}
+
+// let clicks on empty space fall through to the titlebar for window dragging
+- (NSView *)hitTest:(NSPoint)point {
+    NSView *ans = [super hitTest:point];
+    return ans == self ? nil : ans;
+}
+
+- (NSArray<KittyTitlebarTabView *> *)tabViews {
+    NSMutableArray<KittyTitlebarTabView *> *ans = [NSMutableArray array];
+    for (NSView *v in self.subviews) {
+        if ([v isKindOfClass:[KittyTitlebarTabView class]] && !((KittyTitlebarTabView*)v).marked_for_removal) [ans addObject:(KittyTitlebarTabView*)v];
+    }
+    return ans;
+}
+
+- (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs {
+    NSArray<KittyTitlebarTabView *> *tabs = [self tabViews];
+    const CGFloat available = self.bounds.size.width - kNewTabButtonWidth - kTabSpacing;
+    const NSUInteger n = tabs.count;
+    CGFloat tab_width = kTabMaxWidth;
+    if (n > 0) tab_width = MIN(kTabMaxWidth, MAX(kTabMinWidth, (available - kTabSpacing * (n - 1)) / n));
+    // center the tabs vertically in the visible titlebar area, which spans
+    // from the top of the content area to the top of the window
+    CGFloat center_y = NSMidY(self.bounds);
+    NSWindow *window = self.window;
+    if (window) {
+        const CGFloat titlebar_bottom_win = NSMaxY(window.contentLayoutRect);
+        const CGFloat titlebar_top_win = window.frame.size.height;
+        if (titlebar_top_win > titlebar_bottom_win) {
+            NSPoint p = [self convertPoint:NSMakePoint(0, (titlebar_bottom_win + titlebar_top_win) / 2.0) fromView:nil];
+            center_y = p.y;
+        }
+    }
+    const CGFloat y = center_y - kTabHeight / 2.0;
+    CGFloat x = 0;
+    void (^apply)(void) = ^{
+        CGFloat cx = x;
+        for (KittyTitlebarTabView *tab in tabs) {
+            NSRect frame = NSMakeRect(cx, y, tab_width, kTabHeight);
+            if (animated && ![new_tabs containsObject:tab]) {
+                [[tab animator] setFrame:frame];
+            } else {
+                tab.frame = frame;
+                if ([new_tabs containsObject:tab] && animated) {
+                    tab.alphaValue = 0.0;
+                    [[tab animator] setAlphaValue:1.0];
+                }
+            }
+            tab.needsLayout = YES;
+            cx += tab_width + kTabSpacing;
+        }
+        NSRect btn_frame = NSMakeRect(cx, y, kNewTabButtonWidth, kTabHeight);
+        if (animated) [[self.plusButton animator] setFrame:btn_frame];
+        else self.plusButton.frame = btn_frame;
+    };
+    if (animated) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = kTabAnimationDuration;
+            ctx.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            apply();
+        }];
+    } else apply();
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    [super resizeSubviewsWithOldSize:oldSize];
+    [self layoutTabsAnimated:NO initialLayoutForNewTabs:nil];
+}
+
+- (void)updateWithTabs:(const TitlebarTabInfo *)infos count:(size_t)count {
+    self.plusButton.os_window_id = self.os_window_id;
+    NSMutableDictionary<NSNumber*, KittyTitlebarTabView*> *existing = [NSMutableDictionary dictionary];
+    for (KittyTitlebarTabView *tab in [self tabViews]) existing[@(tab.tab_id)] = tab;
+    NSMutableArray<KittyTitlebarTabView*> *new_tabs = [NSMutableArray array];
+    NSMutableArray<KittyTitlebarTabView*> *ordered = [NSMutableArray array];
+    BOOL active_changed = NO;
+    for (size_t i = 0; i < count; i++) {
+        KittyTitlebarTabView *tab = existing[@(infos[i].tab_id)];
+        if (!tab) {
+            tab = [[KittyTitlebarTabView alloc] initWithFrame:NSZeroRect];
+            tab.tab_id = infos[i].tab_id;
+            [self addSubview:tab];
+            [new_tabs addObject:tab];
+            [tab release];
+        } else {
+            [existing removeObjectForKey:@(infos[i].tab_id)];
+        }
+        tab.os_window_id = self.os_window_id;
+        if (tab.is_active != infos[i].is_active) active_changed = YES;
+        tab.is_active = infos[i].is_active;
+        tab.needs_attention = infos[i].needs_attention;
+        tab.fg_rgb = infos[i].fg;
+        tab.bg_rgb = infos[i].bg;
+        NSString *title = infos[i].title ? @(infos[i].title) : @"";
+        if (![tab.titleField.stringValue isEqualToString:title]) tab.titleField.stringValue = title;
+        [tab applyColorsAnimated:active_changed && tab.is_active];
+        [ordered addObject:tab];
+    }
+    // re-order subviews only when the tab order actually changed, as
+    // removing/re-adding views invalidates their tracking areas
+    if (![[self tabViews] isEqualToArray:ordered]) {
+        for (KittyTitlebarTabView *tab in ordered) {
+            [tab retain];
+            [tab removeFromSuperviewWithoutNeedingDisplay];
+            [self addSubview:tab];
+            [tab release];
+        }
+    }
+    // removed tabs: fade out then remove
+    for (NSNumber *key in existing) {
+        KittyTitlebarTabView *tab = existing[key];
+        tab.marked_for_removal = YES;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+            ctx.duration = kTabAnimationDuration;
+            [[tab animator] setAlphaValue:0.0];
+        } completionHandler:^{
+            [tab removeFromSuperview];
+        }];
+    }
+    [self layoutTabsAnimated:(new_tabs.count > 0 || existing.count > 0) initialLayoutForNewTabs:new_tabs];
+    // re-sync hover state with the actual mouse position, lost mouseExited
+    // events would otherwise leave tabs stuck in the hovered state
+    NSPoint mouse = [self.window mouseLocationOutsideOfEventStream];
+    for (KittyTitlebarTabView *tab in ordered) {
+        NSPoint p = [tab convertPoint:mouse fromView:nil];
+        BOOL h = NSPointInRect(p, tab.bounds);
+        if (h != tab.hovered) {
+            tab.hovered = h;
+            if (!h) tab.close_hovered = NO;
+            [tab applyColorsAnimated:NO];
+        }
+    }
+}
+
+@end
+
+static KittyTitlebarTabBarView*
+titlebar_tab_bar_view_for_window(NSWindow *window, bool create) {
+    NSButton *close_button = [window standardWindowButton:NSWindowCloseButton];
+    NSView *titlebarView = close_button ? close_button.superview : nil;
+    if (!titlebarView) return nil;
+    for (NSView *v in titlebarView.subviews) {
+        if ([v.identifier isEqualToString:TITLEBAR_TABS_IDENTIFIER]) return (KittyTitlebarTabBarView*)v;
+    }
+    if (!create) return nil;
+    KittyTitlebarTabBarView *bar = [[KittyTitlebarTabBarView alloc] initWithFrame:NSZeroRect];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    [titlebarView addSubview:bar];
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.topAnchor constraintEqualToAnchor:titlebarView.topAnchor],
+        [bar.bottomAnchor constraintEqualToAnchor:titlebarView.bottomAnchor],
+        [bar.leadingAnchor constraintEqualToAnchor:titlebarView.leadingAnchor constant:kTabBarLeftMargin],
+        [bar.trailingAnchor constraintEqualToAnchor:titlebarView.trailingAnchor constant:-8],
+    ]];
+    [bar release];
+    window.titleVisibility = NSWindowTitleHidden;
+    return bar;
+}
+
+void
+cocoa_update_titlebar_tabs(void *w, unsigned long long os_window_id, const TitlebarTabInfo *tabs, size_t count) { @autoreleasepool {
+    NSWindow *window = (NSWindow*)w;
+    if (!window) return;
+    KittyTitlebarTabBarView *bar = titlebar_tab_bar_view_for_window(window, count > 0);
+    if (!bar) return;
+    if (count == 0) {
+        window.titleVisibility = NSWindowTitleVisible;
+        if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
+        [bar removeFromSuperview];
+        return;
+    }
+    bar.os_window_id = os_window_id;
+    window.titleVisibility = NSWindowTitleHidden;
+    if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+    [bar updateWithTabs:tabs count:count];
+}}
+
 // }}}
 
 // Dock badge {{{
