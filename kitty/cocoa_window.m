@@ -1405,8 +1405,12 @@ titlebar_tab_color_from_rgb(unsigned int c) {
     return [NSColor colorWithSRGBRed:((c >> 16) & 0xff) / 255.0 green:((c >> 8) & 0xff) / 255.0 blue:(c & 0xff) / 255.0 alpha:1.0];
 }
 
-@interface KittyTitlebarTabView : NSView {
+static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.titlebar-tab";
+
+@interface KittyTitlebarTabView : NSView <NSDraggingSource> {
     NSTrackingArea *tracking_area;
+    NSPoint mouse_down_location;
+    BOOL drag_in_progress;
 }
 @property (nonatomic) unsigned long long tab_id;
 @property (nonatomic) unsigned long long os_window_id;
@@ -1479,7 +1483,7 @@ titlebar_tab_color_from_rgb(unsigned int c) {
     }
     self.layer.backgroundColor = bg.CGColor;
     self.titleField.textColor = fg;
-    self.titleField.font = self.is_active ? [NSFont boldSystemFontOfSize:12] : [NSFont systemFontOfSize:12];
+    self.titleField.font = [NSFont systemFontOfSize:12];
     [self setNeedsDisplay:YES];
 }
 
@@ -1544,10 +1548,53 @@ titlebar_tab_color_from_rgb(unsigned int c) {
 
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 - (BOOL)mouseDownCanMoveWindow { return NO; }
-- (void)mouseDown:(NSEvent *)event { (void)event; }
+
+- (void)mouseDown:(NSEvent *)event {
+    mouse_down_location = [self convertPoint:event.locationInWindow fromView:nil];
+    drag_in_progress = NO;
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (drag_in_progress || self.marked_for_removal) return;
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    if (fabs(p.x - mouse_down_location.x) < 4 && fabs(p.y - mouse_down_location.y) < 4) return;
+    NSPasteboardItem *pb = [[NSPasteboardItem alloc] init];
+    [pb setString:[NSString stringWithFormat:@"%llu %llu", self.os_window_id, self.tab_id] forType:KittyTitlebarTabPasteboardType];
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:pb];
+    NSBitmapImageRep *rep = [self bitmapImageRepForCachingDisplayInRect:self.bounds];
+    NSImage *img = nil;
+    if (rep) {
+        [self cacheDisplayInRect:self.bounds toBitmapImageRep:rep];
+        img = [[[NSImage alloc] initWithSize:self.bounds.size] autorelease];
+        [img addRepresentation:rep];
+    }
+    [item setDraggingFrame:self.bounds contents:img];
+    NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item] event:event source:self];
+    session.animatesToStartingPositionsOnCancelOrFail = NO;
+    [item release];
+    [pb release];
+    drag_in_progress = YES;
+    self.alphaValue = 0.5;
+}
+
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    (void)session; (void)context;
+    return NSDragOperationMove;
+}
+
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)screenPoint operation:(NSDragOperation)operation {
+    (void)session;
+    drag_in_progress = NO;
+    self.alphaValue = 1.0;
+    if (operation == NSDragOperationNone && !self.marked_for_removal) {
+        char payload[160];
+        snprintf(payload, sizeof(payload), "%llu %llu %d %d", self.os_window_id, self.tab_id, (int)screenPoint.x, (int)screenPoint.y);
+        set_cocoa_pending_action(TITLEBAR_TAB_DETACH, payload);
+    }
+}
 
 - (void)mouseUp:(NSEvent *)event {
-    if (self.marked_for_removal) return;
+    if (self.marked_for_removal || drag_in_progress) return;
     NSPoint pos = [self convertPoint:event.locationInWindow fromView:nil];
     if (!NSPointInRect(pos, self.bounds)) return;
     if (NSPointInRect(pos, NSInsetRect([self closeButtonRect], -2, -2))) {
@@ -1645,6 +1692,7 @@ titlebar_tab_color_from_rgb(unsigned int c) {
         self.plusButton = b;
         [self addSubview:b];
         [b release];
+        [self registerForDraggedTypes:@[KittyTitlebarTabPasteboardType]];
     }
     return self;
 }
@@ -1654,10 +1702,30 @@ titlebar_tab_color_from_rgb(unsigned int c) {
     [super dealloc];
 }
 
-// let clicks on empty space fall through to the titlebar for window dragging
-- (NSView *)hitTest:(NSPoint)point {
-    NSView *ans = [super hitTest:point];
-    return ans == self ? nil : ans;
+// empty areas of the bar still drag the window, while remaining a valid
+// drop target for tab drags
+- (BOOL)mouseDownCanMoveWindow { return YES; }
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    return [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType] ? NSDragOperationMove : NSDragOperationNone;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    return [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType] ? NSDragOperationMove : NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSString *payload = [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType];
+    if (!payload) return NO;
+    NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
+    unsigned int idx = 0;
+    for (KittyTitlebarTabView *tab in [self tabViews]) {
+        if (p.x > NSMidX(tab.frame)) idx++;
+    }
+    char buf[224];
+    snprintf(buf, sizeof(buf), "%s %llu %u", payload.UTF8String, self.os_window_id, idx);
+    set_cocoa_pending_action(TITLEBAR_TAB_DROP, buf);
+    return YES;
 }
 
 - (NSArray<KittyTitlebarTabView *> *)tabViews {

@@ -1453,6 +1453,50 @@ class Boss:
         if tm is not None:
             tm.new_tab()
 
+    def titlebar_tab_drop(self, payload: str) -> None:
+        try:
+            src_os_window_id, tab_id, dst_os_window_id, idx = map(int, payload.split())
+        except Exception:
+            return
+        tm_src = self.os_window_map.get(src_os_window_id)
+        tm_dst = self.os_window_map.get(dst_os_window_id)
+        if tm_src is None or tm_dst is None:
+            return
+        tab = tm_src.tab_for_id(tab_id)
+        if tab is None:
+            return
+        if tm_src is tm_dst:
+            orig = tm_dst.tabs.index(tab)
+            tabs = [t for t in tm_dst.tabs if t is not tab]
+            if orig < idx:
+                idx -= 1
+            idx = max(0, min(idx, len(tabs)))
+            tabs.insert(idx, tab)
+            tm_dst.apply_tab_ordering([t.id for t in tabs])
+            tm_dst.set_active_tab(tab)
+        else:
+            new_tab = self._move_tab_to(tab=tab, target_os_window_id=dst_os_window_id)
+            if new_tab is None:
+                return
+            tabs = [t for t in tm_dst.tabs if t is not new_tab]
+            idx = max(0, min(idx, len(tabs)))
+            tabs.insert(idx, new_tab)
+            tm_dst.apply_tab_ordering([t.id for t in tabs])
+            tm_dst.set_active_tab(new_tab)
+            focus_os_window(dst_os_window_id, True)
+
+    def titlebar_tab_detach(self, payload: str) -> None:
+        try:
+            os_window_id, tab_id = map(int, payload.split()[:2])
+        except Exception:
+            return
+        tm = self.os_window_map.get(os_window_id)
+        if tm is None or len(tm.tabs) < 2:
+            return
+        tab = tm.tab_for_id(tab_id)
+        if tab is not None:
+            self._move_tab_to(tab=tab, target_os_window_id=None)
+
     def start_tab_drag(self, os_window_id: int, window_id: int, pixels: bytes, width: int, height: int) -> None:
         if tm := self.os_window_map.get(os_window_id):
             tm.start_tab_drag(pixels, width, height)

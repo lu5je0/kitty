@@ -1355,6 +1355,8 @@ process_cocoa_pending_actions(void) {
         if (cocoa_pending_actions[TITLEBAR_TAB_ACTIVATE]) { call_boss(titlebar_tab_activate, "s", cocoa_pending_actions_data.wd); }
         if (cocoa_pending_actions[TITLEBAR_TAB_CLOSE]) { call_boss(titlebar_tab_close, "s", cocoa_pending_actions_data.wd); }
         if (cocoa_pending_actions[TITLEBAR_TAB_NEW]) { call_boss(titlebar_tab_new, "s", cocoa_pending_actions_data.wd); }
+        if (cocoa_pending_actions[TITLEBAR_TAB_DROP]) { call_boss(titlebar_tab_drop, "s", cocoa_pending_actions_data.wd); }
+        if (cocoa_pending_actions[TITLEBAR_TAB_DETACH]) { call_boss(titlebar_tab_detach, "s", cocoa_pending_actions_data.wd); }
         free(cocoa_pending_actions_data.wd);
         cocoa_pending_actions_data.wd = NULL;
     }
