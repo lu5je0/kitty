@@ -1399,6 +1399,7 @@ static const CGFloat kTabMaxWidth = 200.0, kTabMinWidth = 60.0, kTabHeight = 24.
 static const CGFloat kTabBarLeftMargin = 84.0;  // clear the traffic light buttons
 static const CGFloat kNewTabButtonWidth = 28.0;
 static const NSTimeInterval kTabAnimationDuration = 0.18;
+static const CGFloat kTabDetachMargin = 40.0;  // tear-off requires the drop point to be this far from the tab bar
 
 static NSColor*
 titlebar_tab_color_from_rgb(unsigned int c) {
@@ -1406,6 +1407,21 @@ titlebar_tab_color_from_rgb(unsigned int c) {
 }
 
 static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.titlebar-tab";
+
+@class KittyTitlebarTabView;
+@class KittyTitlebarNewTabButton;
+
+@interface KittyTitlebarTabBarView : NSView
+@property (nonatomic) unsigned long long os_window_id;
+@property (nonatomic, retain) KittyTitlebarNewTabButton *plusButton;
+@property (nonatomic, assign) KittyTitlebarTabView *dragged_tab;
+@property (nonatomic) NSUInteger drag_index;
+@property (nonatomic) BOOL drop_was_internal;
+@property (nonatomic) CGFloat last_drag_x;
+@property (nonatomic) CGFloat last_tab_width;
+- (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs draggedTab:(KittyTitlebarTabView*)dragged_tab dragIndex:(NSUInteger)drag_index;
+- (void)positionDraggedTabAtPoint:(NSPoint)p;
+@end
 
 @interface KittyTitlebarTabView : NSView <NSDraggingSource> {
     NSTrackingArea *tracking_area;
@@ -1422,6 +1438,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 @property (nonatomic) unsigned int fg_rgb;
 @property (nonatomic) unsigned int bg_rgb;
 @property (nonatomic, retain) NSTextField *titleField;
+- (CGFloat)dragGrabOffsetX;
 @end
 
 @implementation KittyTitlebarTabView
@@ -1554,6 +1571,10 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     drag_in_progress = NO;
 }
 
+- (CGFloat)dragGrabOffsetX {
+    return mouse_down_location.x;
+}
+
 - (void)mouseDragged:(NSEvent *)event {
     if (drag_in_progress || self.marked_for_removal) return;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
@@ -1561,20 +1582,22 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     NSPasteboardItem *pb = [[NSPasteboardItem alloc] init];
     [pb setString:[NSString stringWithFormat:@"%llu %llu", self.os_window_id, self.tab_id] forType:KittyTitlebarTabPasteboardType];
     NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:pb];
-    NSBitmapImageRep *rep = [self bitmapImageRepForCachingDisplayInRect:self.bounds];
-    NSImage *img = nil;
-    if (rep) {
-        [self cacheDisplayInRect:self.bounds toBitmapImageRep:rep];
-        img = [[[NSImage alloc] initWithSize:self.bounds.size] autorelease];
-        [img addRepresentation:rep];
-    }
-    [item setDraggingFrame:self.bounds contents:img];
+    // a fully transparent image of the tab's size keeps the system from
+    // auto-capturing the view (which would follow the cursor as a
+    // semi-transparent tab); the tab view itself is the visible ghost,
+    // lifted above its siblings so its Y stays locked to the tab bar
+    NSImage *empty = [[[NSImage alloc] initWithSize:self.bounds.size] autorelease];
+    [empty lockFocus];
+    [[NSColor clearColor] setFill];
+    NSRectFill(NSMakeRect(0, 0, self.bounds.size.width, self.bounds.size.height));
+    [empty unlockFocus];
+    [item setDraggingFrame:self.bounds contents:empty];
     NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item] event:event source:self];
     session.animatesToStartingPositionsOnCancelOrFail = NO;
     [item release];
     [pb release];
     drag_in_progress = YES;
-    self.alphaValue = 0.5;
+    [self.superview addSubview:self];  // lift the ghost above its siblings
 }
 
 - (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
@@ -1582,14 +1605,50 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     return NSDragOperationMove;
 }
 
+- (void)draggingSession:(NSDraggingSession *)session movedToPoint:(NSPoint)screenPoint {
+    (void)session; (void)screenPoint;
+    // called for every mouse move during the drag, even outside the tab
+    // bar; the ghost follows the cursor once torn off and snaps back to
+    // the bar as soon as the cursor returns within the tear-off margin
+    KittyTitlebarTabBarView *bar = (KittyTitlebarTabBarView*)self.superview;
+    if (![bar isKindOfClass:[KittyTitlebarTabBarView class]] || bar.dragged_tab != self) return;
+    NSPoint p = [bar convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
+    [bar positionDraggedTabAtPoint:p];
+}
+
 - (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)screenPoint operation:(NSDragOperation)operation {
     (void)session;
     drag_in_progress = NO;
-    self.alphaValue = 1.0;
-    if (operation == NSDragOperationNone && !self.marked_for_removal) {
-        char payload[160];
-        snprintf(payload, sizeof(payload), "%llu %llu %d %d", self.os_window_id, self.tab_id, (int)screenPoint.x, (int)screenPoint.y);
-        set_cocoa_pending_action(TITLEBAR_TAB_DETACH, payload);
+    KittyTitlebarTabBarView *bar = (KittyTitlebarTabBarView*)self.superview;
+    if ([bar isKindOfClass:[KittyTitlebarTabBarView class]]) {
+        NSUInteger last_index = bar.drag_index;
+        BOOL dropped_here = bar.drop_was_internal;
+        bar.dragged_tab = nil;
+        bar.drag_index = NSNotFound;
+        bar.drop_was_internal = NO;
+        if (operation == NSDragOperationNone && !self.marked_for_removal) {
+            // like Chrome, only tear the tab off when the drop point is
+            // well outside the tab bar; releasing just below it commits
+            // the reorder at the last position instead. The drop point is
+            // the current mouse location in the window, measured in the
+            // bar's own coordinates, which avoids coordinate ambiguity.
+            NSPoint p = [bar convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
+            BOOL tear_off = p.y < -kTabDetachMargin || p.y > bar.bounds.size.height + kTabDetachMargin;
+            if (tear_off) {
+                char payload[160];
+                snprintf(payload, sizeof(payload), "%llu %llu %d %d", self.os_window_id, self.tab_id, (int)screenPoint.x, (int)screenPoint.y);
+                set_cocoa_pending_action(TITLEBAR_TAB_DETACH, payload);
+            } else if (last_index != NSNotFound) {
+                // land the ghost into the gap, then commit the reorder
+                [bar layoutTabsAnimated:YES initialLayoutForNewTabs:nil draggedTab:self dragIndex:last_index];
+                char payload[224];
+                snprintf(payload, sizeof(payload), "%llu %llu %llu %u", self.os_window_id, self.tab_id, self.os_window_id, (unsigned)last_index);
+                set_cocoa_pending_action(TITLEBAR_TAB_DROP, payload);
+            }
+        } else if (operation == NSDragOperationMove && dropped_here && !self.marked_for_removal) {
+            // dropped back into this window's tab bar: land into the gap
+            [bar layoutTabsAnimated:YES initialLayoutForNewTabs:nil draggedTab:self dragIndex:last_index];
+        }
     }
 }
 
@@ -1678,16 +1737,12 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 
 @end
 
-@interface KittyTitlebarTabBarView : NSView
-@property (nonatomic) unsigned long long os_window_id;
-@property (nonatomic, retain) KittyTitlebarNewTabButton *plusButton;
-@end
-
 @implementation KittyTitlebarTabBarView
 
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.identifier = TITLEBAR_TABS_IDENTIFIER;
+        self.drag_index = NSNotFound;
         KittyTitlebarNewTabButton *b = [[KittyTitlebarNewTabButton alloc] initWithFrame:NSZeroRect];
         self.plusButton = b;
         [self addSubview:b];
@@ -1706,22 +1761,86 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 // drop target for tab drags
 - (BOOL)mouseDownCanMoveWindow { return YES; }
 
+- (NSUInteger)dropIndexForPoint:(NSPoint)p {
+    NSUInteger idx = 0;
+    KittyTitlebarTabView *dragged = self.dragged_tab;
+    if (dragged) {
+        // like Chrome, swap once the ghost covers more than half of the
+        // neighboring tab. The ghost follows the cursor from the point
+        // where the tab was grabbed, so use its real edges, not the
+        // cursor position. The dragged tab itself is excluded, otherwise
+        // the cursor crossing its own midpoint would flip the index back
+        // and forth.
+        const BOOL moving_right = p.x >= self.last_drag_x;
+        const CGFloat ghost_left = p.x - [dragged dragGrabOffsetX];
+        const CGFloat ghost_right = ghost_left + self.last_tab_width;
+        for (KittyTitlebarTabView *tab in [self tabViews]) {
+            if (tab == dragged) continue;
+            if (moving_right ? ghost_right > NSMidX(tab.frame) : NSMidX(tab.frame) < ghost_left) idx++;
+        }
+    } else {
+        for (KittyTitlebarTabView *tab in [self tabViews]) {
+            if (p.x > NSMidX(tab.frame)) idx++;
+        }
+    }
+    return idx;
+}
+
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
-    return [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType] ? NSDragOperationMove : NSDragOperationNone;
+    NSString *payload = [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType];
+    if (!payload) return NSDragOperationNone;
+    self.drop_was_internal = NO;
+    self.dragged_tab = nil;
+    self.drag_index = NSNotFound;
+    self.last_drag_x = [self convertPoint:sender.draggingLocation fromView:nil].x;
+    NSArray<NSString*> *parts = [payload componentsSeparatedByString:@" "];
+    if (parts.count > 1) {
+        unsigned long long tid = [parts[1] longLongValue];
+        NSUInteger i = 0;
+        for (KittyTitlebarTabView *tab in [self tabViews]) {
+            if (tab.tab_id == tid) { self.dragged_tab = tab; self.drag_index = i; break; }
+            i++;
+        }
+    }
+    return NSDragOperationMove;
 }
 
 - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
-    return [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType] ? NSDragOperationMove : NSDragOperationNone;
+    NSString *payload = [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType];
+    if (!payload) return NSDragOperationNone;
+    NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
+    if (self.dragged_tab) {
+        NSUInteger idx = [self dropIndexForPoint:p];
+        if (idx != self.drag_index) {
+            self.drag_index = idx;
+            [self layoutTabsAnimated:YES initialLayoutForNewTabs:nil draggedTab:self.dragged_tab dragIndex:idx];
+        }
+    }
+    self.last_drag_x = p.x;
+    return NSDragOperationMove;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    // the reflowed layout is kept so that releasing just outside the bar
+    // commits the reorder, and tearing off lets Python close the gap
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
     NSString *payload = [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType];
     if (!payload) return NO;
     NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
-    unsigned int idx = 0;
-    for (KittyTitlebarTabView *tab in [self tabViews]) {
-        if (p.x > NSMidX(tab.frame)) idx++;
+    unsigned int idx = (unsigned int)[self dropIndexForPoint:p];
+    NSArray<NSString*> *parts = [payload componentsSeparatedByString:@" "];
+    self.drop_was_internal = NO;
+    if (parts.count > 1) {
+        unsigned long long tid = [parts[1] longLongValue];
+        for (KittyTitlebarTabView *tab in [self tabViews]) {
+            if (tab.tab_id == tid) { self.drop_was_internal = YES; break; }
+        }
     }
+    // keep dragged_tab/drag_index until the source's draggingSession:ended
+    // reads them to land the ghost into the gap
     char buf[224];
     snprintf(buf, sizeof(buf), "%s %llu %u", payload.UTF8String, self.os_window_id, idx);
     set_cocoa_pending_action(TITLEBAR_TAB_DROP, buf);
@@ -1736,14 +1855,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     return ans;
 }
 
-- (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs {
-    NSArray<KittyTitlebarTabView *> *tabs = [self tabViews];
-    const CGFloat available = self.bounds.size.width - kNewTabButtonWidth - kTabSpacing;
-    const NSUInteger n = tabs.count;
-    CGFloat tab_width = kTabMaxWidth;
-    if (n > 0) tab_width = MIN(kTabMaxWidth, MAX(kTabMinWidth, (available - kTabSpacing * (n - 1)) / n));
-    // center the tabs vertically in the visible titlebar area, which spans
-    // from the top of the content area to the top of the window
+- (CGFloat)titlebarCenterY {
     CGFloat center_y = NSMidY(self.bounds);
     NSWindow *window = self.window;
     if (window) {
@@ -1754,11 +1866,51 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
             center_y = p.y;
         }
     }
-    const CGFloat y = center_y - kTabHeight / 2.0;
+    return center_y;
+}
+
+// the dragged tab acts as the ghost: it follows the cursor horizontally but
+// stays locked to the tab bar's Y, like Chrome. Once the cursor leaves the
+// bar beyond the tear-off margin it follows the cursor vertically too,
+// driven by draggingSession:movedToPoint: on the source view.
+- (void)positionDraggedTabAtPoint:(NSPoint)p {
+    KittyTitlebarTabView *tab = self.dragged_tab;
+    if (!tab) return;
+    if (self.subviews.lastObject != tab) [self addSubview:tab];  // keep the ghost on top
+    CGFloat ty = [self titlebarCenterY] - kTabHeight / 2.0;
+    if (p.y < -kTabDetachMargin || p.y > self.bounds.size.height + kTabDetachMargin) {
+        ty = p.y - kTabHeight / 2.0;
+    }
+    [tab setFrame:NSMakeRect(p.x - [tab dragGrabOffsetX], ty, self.last_tab_width, kTabHeight)];
+}
+
+- (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs {
+    [self layoutTabsAnimated:animated initialLayoutForNewTabs:new_tabs draggedTab:self.dragged_tab dragIndex:self.drag_index];
+}
+
+- (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs draggedTab:(KittyTitlebarTabView*)dragged_tab dragIndex:(NSUInteger)drag_index {
+    NSMutableArray<KittyTitlebarTabView *> *tabs = [NSMutableArray arrayWithArray:[self tabViews]];
+    if (dragged_tab && drag_index != NSNotFound && [tabs containsObject:dragged_tab]) {
+        [tabs removeObject:dragged_tab];
+        if (drag_index > tabs.count) drag_index = tabs.count;
+        [tabs insertObject:dragged_tab atIndex:drag_index];
+    }
+    // while a drag is active the dragged tab is a floating ghost positioned
+    // by positionDraggedTabAtPoint, so the layout leaves its slot empty
+    const BOOL ghost_mode = (dragged_tab && self.dragged_tab == dragged_tab);
+    const CGFloat available = self.bounds.size.width - kNewTabButtonWidth - kTabSpacing;
+    const NSUInteger n = tabs.count;
+    CGFloat tab_width = kTabMaxWidth;
+    if (n > 0) tab_width = MIN(kTabMaxWidth, MAX(kTabMinWidth, (available - kTabSpacing * (n - 1)) / n));
+    self.last_tab_width = tab_width;
+    // center the tabs vertically in the visible titlebar area, which spans
+    // from the top of the content area to the top of the window
+    const CGFloat y = [self titlebarCenterY] - kTabHeight / 2.0;
     CGFloat x = 0;
     void (^apply)(void) = ^{
         CGFloat cx = x;
         for (KittyTitlebarTabView *tab in tabs) {
+            if (ghost_mode && tab == dragged_tab) { cx += tab_width + kTabSpacing; continue; }
             NSRect frame = NSMakeRect(cx, y, tab_width, kTabHeight);
             if (animated && ![new_tabs containsObject:tab]) {
                 [[tab animator] setFrame:frame];
