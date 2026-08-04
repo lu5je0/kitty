@@ -653,6 +653,8 @@ struct _GLFWlibrary
         GLFWcurrentselectionfun get_current_selection;
         GLFWhascurrentselectionfun has_current_selection;
         GLFWimecursorpositionfun get_ime_cursor_position;
+        GLFWtitlebartabactionfun titlebar_tab_action;
+        GLFWtitlebartabtextfun titlebar_tab_text;
     } callbacks;
 
     // This is defined in the window API's platform.h

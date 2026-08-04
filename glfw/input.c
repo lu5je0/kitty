@@ -1721,3 +1721,17 @@ GLFWAPI monotonic_t glfwGetTime(void)
     _GLFW_REQUIRE_INIT_OR_RETURN(0);
     return monotonic();
 }
+
+GLFWAPI GLFWtitlebartabactionfun glfwSetTitlebarTabActionCallback(GLFWtitlebartabactionfun cbfun)
+{
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(_glfw.callbacks.titlebar_tab_action, cbfun);
+    return cbfun;
+}
+
+GLFWAPI GLFWtitlebartabtextfun glfwSetTitlebarTabTextCallback(GLFWtitlebartabtextfun cbfun)
+{
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(_glfw.callbacks.titlebar_tab_text, cbfun);
+    return cbfun;
+}

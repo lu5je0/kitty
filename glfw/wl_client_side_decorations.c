@@ -7,6 +7,7 @@
 
 #include "wl_client_side_decorations.h"
 
+#include "wl_titlebar_tabs.h"
 #include "backend_utils.h"
 #include <sys/mman.h>
 #include <errno.h>
@@ -360,6 +361,10 @@ render_title_bar(_GLFWwindow *window, bool to_front_buffer) {
     unsigned num_buttons = 1;
     if (window->wl.wm_capabilities.maximize) num_buttons++;
     if (window->wl.wm_capabilities.minimize) num_buttons++;
+    if (wl_titlebar_tabs_active(window)) {
+        wl_titlebar_tabs_render_bar(window, output, bg_color, fg_color, hover_bg, is_dark);
+        return;
+    }
     if (window->wl.title && window->wl.title[0] && _glfw.callbacks.draw_text) {
         if (_glfw.callbacks.draw_text((GLFWwindow*)window, window->wl.title, fg_color, bg_color, output, decs.titlebar.buffer.width, decs.titlebar.buffer.height, 0, 0, num_buttons * button_size, false)) goto render_buttons;
     }
@@ -665,6 +670,7 @@ csd_set_visible(_GLFWwindow *window, bool visible) {
 
 void
 csd_free_all_resources(_GLFWwindow *window) {
+    wl_titlebar_tabs_free(window);
     free_csd_surfaces(window);
     free_csd_buffers(window);
     if (decs.shadow_tile.data) free(decs.shadow_tile.data);
@@ -766,6 +772,7 @@ set_cursor(GLFWCursorShape shape, _GLFWwindow* window)
 static bool
 update_hovered_button(_GLFWwindow *window) {
     bool has_hovered_button = false;
+    if (wl_titlebar_tabs_handle_motion(window, x, y)) has_hovered_button = true;
     int scaled_x = (int)round(decs.for_window_state.fscale * x);
 #define c(which) \
     if (decs.which.left <= scaled_x && scaled_x < decs.which.left + decs.which.width) { \
@@ -788,6 +795,7 @@ static void
 handle_pointer_leave(_GLFWwindow *window, struct wl_surface *surface) {
 #define c(which) if (decs.which.hovered) { decs.titlebar_needs_update = true; decs.which.hovered = false; }
     if (surface == decs.titlebar.surface) {
+        wl_titlebar_tabs_handle_leave(window);
         c(minimize); c(maximize); c(close);
     }
 #undef c
@@ -833,6 +841,7 @@ handle_pointer_enter(_GLFWwindow *window, struct wl_surface *surface) {
 static void
 handle_pointer_button(_GLFWwindow *window, uint32_t button, uint32_t state) {
     uint32_t edges = XDG_TOPLEVEL_RESIZE_EDGE_NONE;
+    if (decs.focus == CSD_titlebar && wl_titlebar_tabs_handle_button(window, button, state, x, y)) return;
     if (button == BTN_LEFT) {
         switch (decs.focus) {
             case CENTRAL_WINDOW: break;

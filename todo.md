@@ -133,45 +133,57 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 
 ## 接下来要做的（按顺序）
 
-### Stage 1 收尾（剩下的）
-1. `glfw/glfw3.h` 在 preamble 尾部（`} GLFWgamepadstate;` 之后）追加：
-   - `typedef struct GLFWTitlebarTab { unsigned long long tab_id; const char *title; bool is_active, needs_attention; unsigned int fg, bg; } GLFWTitlebarTab;`
-   - `typedef enum GLFWTitlebarTabAction { ACTIVATE, CLOSE, NEW, DROP, DETACH }`
-   - 动作回调与 tab 文字回调的 typedef
-2. `glfw/glfw3.h` 在所有 `GLFWAPI` 声明的**末尾**追加跨平台注册函数
-   （仿 `glfwSetDrawTextFunction`，`glfw3.h:2110`；实现放 `glfw/input.c`，
-   状态存 `_glfw.callbacks`，见 `glfw/internal.h:652`）
-3. `glfw/glfw.py` 硬编码清单里加 `void glfwWaylandSetTitlebarTabs(GLFWwindow*, const GLFWTitlebarTab*, size_t)`
-4. `cd glfw && python3 glfw.py` 重新生成 wrapper
-5. `kitty/glfw.c`：`set_titlebar_tabs` 的非 Apple 分支转发到 `glfwWaylandSetTitlebarTabs`；
-   用 `#ifdef __APPLE__ #define NativeTabInfo TitlebarTabInfo #else ... GLFWTitlebarTab #endif`
-   让解析循环只写一份
-6. `kitty/glfw.c`：实现 tab 文字回调（用 `freetype_render_ctx(false)` + `render_single_line`，
-   字号 `12 * scale` px 以对齐 macOS 的 12pt）并在 `glfw_init` 附近注册；
-   实现动作回调 → `call_boss(titlebar_tab_activate, "s", "os_window_id tab_id")`，
-   **直接复用 `kitty/boss.py` 已有的五个 handler**，macOS 和 Wayland 共用行为
-7. `kitty/tabs.py`：把 `native_titlebar_tabs_supported()` 改回 `is_macos or is_wayland()`
+### Stage 1 收尾 —— ✅ 已完成（2026-08-04）
+1. ✅ `glfw/glfw3.h` preamble：`GLFWTitlebarTab`、`GLFWTitlebarTabAction`（带 `GLFW_TITLEBAR_TAB_` 前缀）、
+   `GLFWtitlebartabactionfun(window, action, tab_id, index)`、`GLFWtitlebartabtextfun(window, text, sz_px, fg, bg, buf, w, h, x_off, y_off, right_margin)`
+2. ✅ 注册函数声明加在 Vulkan 段 `#endif` 之后；实现追加在 `glfw/input.c` 末尾；`_glfw.callbacks` 尾部加两个成员
+3. ✅ `glfw.py` 清单加 `glfwWaylandSetTitlebarTabs`
+4. ✅ wrapper 已重新生成（纯新增 39 行）
+5. ✅ `kitty/glfw.c`：`set_titlebar_tabs` 用 `NativeTabInfo` 宏共享解析循环；非 Apple 分支
+   `if (global_state.is_wayland && glfwWaylandSetTitlebarTabs)` 转发
+6. ✅ 文字回调 `titlebar_tab_text_callback`（**居中逻辑在 kitty 侧做**：先 `freetype_text_width_for_single_line`
+   算宽再挪 x_offset，`render_single_line` 的 center_runs 参数传 false，多 run 文本不会各自居中）；
+   动作回调 `titlebar_tab_action_callback` 五个 action 拼 payload 直呼 `call_boss`（NEW 的 payload 是 "os_window_id 0"，
+   `_titlebar_tab_payload` 要求恰好两个数）
+7. ✅ `tabs.py` 已改回 `is_macos or is_wayland()`
 
-### Stage 2：Wayland 静态渲染与命中
-8. 新建 `glfw/wl_titlebar_tabs.{c,h}`（**纯 fork 专属文件，零冲突**），
-   并加进 `glfw/source-info.json` 的 `wayland.sources`
-9. 状态用**模块内的链表**按 `window->id` 索引，**不要动 `glfw/wl_platform.h`**（省一处合并冲突）；
-   在 `csd_free_all_resources()` 里挂一行清理
-10. 实现 `render_rounded_rect()` 生成 alpha 蒙版 + 一个「位图源」版本的
-    `patch_titlebar_with_alpha_mask()`（现有那个只支持纯色 fg）
-11. 渲染顺序：整条填标题栏底色 → 逐个 tab（先在 tab 尺寸的 scratch buffer 里填 bg + 画文字 + 画 ×，
-    再透过圆角蒙版合成进 titlebar buffer）→ + 按钮
-12. 在 `render_title_bar()` 里**只加 4 行钩子**（不改上游任何行）：
-    ```c
-    if (wl_titlebar_tabs_active(window)) { wl_titlebar_tabs_render(window, output); goto render_buttons; }
-    ```
-    放在上游那段 `if (window->wl.title && ...)` 之前，让上游的 `render_buttons:` 继续画窗口按钮。
-    bar 可用宽度 = `buf_width - num_buttons*button_size - 8*scale`
-13. `update_hovered_button()` / `handle_pointer_button()` 各在开头加一行转发；
-    `handle_pointer_button()` 目前只处理 `BTN_LEFT`/`BTN_RIGHT`，**要加 `BTN_MIDDLE`**
-14. 保留原有标题栏行为：双击最大化、空白区 `xdg_toplevel_move` 拖窗、右键 `xdg_toplevel_show_window_menu`，
-    只在非 tab 区域生效
-15. 开启选项时强制 CSD
+### Stage 2：Wayland 静态渲染与命中 —— ✅ 已完成（2026-08-04），待真机验证
+8. ✅ `glfw/wl_titlebar_tabs.{c,h}` 已建，加进 `source-info.json`（注意保持 2 空格缩进）
+9. ✅ 模块内链表 `all_states` 按 `window->id` 索引；`csd_free_all_resources()` 头部一行清理
+10-11. ✅ 没用 alpha 蒙版 patch 方案，改为**解析覆盖率**（每像素 4×4 子采样）：
+    `rounded_rect_coverage` / `segment_coverage` / `circle_coverage` + `blend_argb`；
+    每个 tab 先在 scratch Canvas 里填 bg → 文字回调 → close 圆/×，再 `canvas_composite_rounded` 进 bar
+12. ✅ `render_title_bar()` 钩子（4 行 + include）：available = buffer.width - num_buttons*button_size - 8*fscale
+13. ✅ `update_hovered_button()` 加 1 行；`handle_pointer_button()` 开头 1 行转发（含 BTN_MIDDLE，
+    wl_init.c 的 pointerHandleButton 对 CSD focus 的所有 button 都会转发过来，无需改它）；
+    `handle_pointer_leave()` 加 1 行清 hover
+14. ✅ 双击最大化/拖窗/右键菜单只在 tab 命中失败时走上游逻辑（转发函数返回 false）
+15. ✅ 强制 CSD 放在 `glfwWaylandSetTitlebarTabs` 里：`decs.serverSide` 时 set_mode(CLIENT_SIDE) + csd_set_visible
+16. **标题栏加高的做法**：没改 `csd_initialize_metrics()`（避免所有窗口受影响），而是首次收到
+    tabs 时把该窗口 `decs.metrics.top` 改为 `width + 38`（`visible_titlebar_height=38`，24px tab 居中余 7px），
+    并把 `decs.for_window_state.width = 0` 强制 `ensure_csd_resources()` 重建缓冲。
+    **风险**：若首次 set 晚于首次 configure，xdg geometry 可能一帧不一致 —— 真机验证点之一
+17. 构建验证：`python3 setup.py build` 通过（-Werror），`nm -D glfw-wayland.so` 三个符号都在，
+    `./test.py --module ime_mode` 通过。构建需要 `fonts/SymbolsNerdFontMono-Regular.ttf`（repo 根 fonts/，勿提交）
+
+### Stage 2 真机验证 —— ✅ 已完成（2026-08-04，kwin/Fedora，spectacle 截图比对）
+
+实测修出来的问题与新增（都已验证）：
+- **标题栏底色不生效**：`glfwWaylandSetTitlebarColor` 在 `decs.serverSide` 时直接丢弃（kwin 初始 SSD，颜色调用发生在窗口创建时、强制 CSD 之前）。修法：`glfwWaylandSetTitlebarTabs` 增加 `bar_color/use_system_color` 参数，kitty 侧从 `w->last_window_chrome` 透传，函数内强制 CSD 后走 `csd_set_titlebar_color()`。**不要**用「tabs 显示后再调一次 `set_os_window_chrome`」的方案——它会被 `last_window_chrome` 的去重挡掉
+- **标题栏高度**：38 → **28** 逻辑 px（从 macos.png 逐像素实测：24px tab 上下各 2px）
+- **窗口顶角圆角**：`round_top_corners()` 预乘 alpha 切角，半径 10 逻辑 px。**必须在窗口按钮之后执行**（上游 drawb 会用不透明像素盖掉右上角）——现在整个 bar（含按钮）都由 `wl_titlebar_tabs_render_bar()` 画，顺序已保证。底部两角是 GL 主表面，CSD 侧切不了（要么 kwin 特效，要么 kitty GL 改动），目前方角
+- **紧凑窗口按钮**（用户要求 KDE 尺寸）：上游按钮是 bar 高度见方（28px bar 下太大），改为自绘 Breeze 风格：cell 宽 28、图标臂 5、hover 圆底直径 20，min=下箭头/max=上箭头（最大化时反转）/close=×（hover 红圆底）。`decs.minimize/maximize/close.left/width` 仍被写入，上游命中逻辑照常工作
+- **左边距**（用户要求）：第一个 tab 距左缘 `TAB_BAR_LEFT_MARGIN = 8` 逻辑 px
+- **栏内拖动重排 + 撕下**（用户要求）：press 记录 grab offset，位移 ≥4px 进入拖动（先发 ACTIVATE，同 macOS），ghost 跟随光标钳制在 bar 内每帧重绘；松手时光标纵向超出 bar±40px → DETACH，否则按 ghost 中心所在 slot 计算 index → DROP。**跨窗口拖拽仍未做**（上游 mime 拖拽那套，见 Stage 4 原计划）
+- 离屏回归（`.wl-test/harness.c`，9 项全过）：ACTIVATE/CLOSE/中键/NEW/空白区不吞事件/拖出无动作/拖动激活/DROP index/DETACH
+
+颜色实测（kwin 截图 vs macos.png）：bar #393A39 ✓、active tab #626366 ✓、标题字 #F0F0F1 ✓、× alpha 0.6 ✓
+
+### 仍待做
+- hover 状态真机确认（离屏已验）、分数缩放真机实测（离屏 1x/1.25x/2x 已验）
+- mutter（强制 CSD 路径）、sway/hyprland 实测
+- 底部窗口圆角（GL 主表面，需另做）
+- Stage 3 动画、跨窗口拖拽（复用上游 mime 方案）
 
 ### Stage 3：动画
 16. `wl_subsurface_set_desync(decs.titlebar.subsurface)` —— 子表面默认是同步模式，
