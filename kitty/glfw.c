@@ -2599,8 +2599,11 @@ set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
     if (!window) Py_RETURN_NONE;
     cocoa_update_titlebar_tabs(window, os_window_id, tinfo, count);
 #else
-    if (global_state.is_wayland && glfwWaylandSetTitlebarTabs)
-        glfwWaylandSetTitlebarTabs(w->handle, tinfo, count, w->last_window_chrome.color, w->last_window_chrome.use_system_color);
+    if (global_state.is_wayland && glfwWaylandSetTitlebarTabs) {
+        w->wayland_titlebar_tabs_active = count > 0;
+        glfwWaylandSetTitlebarTabs(w->handle, tinfo, count, w->last_window_chrome.color, w->last_window_chrome.use_system_color,
+                OPT(macos_titlebar_color) < 0 ? (int)-OPT(macos_titlebar_color) : 0);
+    }
 #endif
 #undef NativeTabInfo
     Py_RETURN_NONE;

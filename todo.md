@@ -184,19 +184,46 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 颜色实测（kwin 截图 vs macos.png）：bar #393A39 ✓、active tab #626366 ✓、标题字 #F0F0F1 ✓、× alpha 0.6 ✓
 
 ### 仍待做
-- hover 状态真机确认（离屏已验）、分数缩放真机实测（离屏 1x/1.25x/2x 已验）
-- mutter（强制 CSD 路径）、sway/hyprland 实测
-- 底部窗口圆角（GL 主表面，需另做）
-- Stage 3 动画、跨窗口拖拽（复用上游 mime 方案）
+- hover 动画/拖拽滑入真机手动确认（指针事件无法脚本化；引擎与其它动画共用，中间帧已验）
+- mutter（强制 CSD 路径）、sway/hyprland 实测；分数缩放真机实测
+- 跨窗口拖拽（复用上游 mime 方案，见 Stage 4）
 
-### Stage 3：动画
-16. `wl_subsurface_set_desync(decs.titlebar.subsurface)` —— 子表面默认是同步模式，
-    必须靠父表面提交才生效；desync 后 titlebar 可独立提交，不和 GL 出帧互相干扰
-17. 一个 ~60Hz 的 repeating timer，有任何 bar 在动画时才 enable；
-    tick 里推进插值 → `csd_change_title()`
-18. **把每个 tab 的标题文字缓存成 alpha 蒙版**。动画每帧重新跑 FreeType 太贵，
-    缓存后动画帧退化成纯 blit
-19. 逐项对齐上面「动画」小节的 5 种动画
+### Stage 3：动画 —— ✅ 已完成（2026-08-04，kwin 真机中间帧截图验证）
+
+实现（全部收在 `glfw/wl_titlebar_tabs.c`，零新钩子）：
+- **tab 状态持久化 + 按 tab_id diff**：`glfwWaylandSetTitlebarTabs` 不再全量重建；
+  被移除的 tab 标记 `dying` 冻结原位淡出，淡完在 timer tick 里 reap
+- 5 种动画全部 0.18s / ease-out cubic（`Anim {from,to,start,active}` 小引擎）：
+  位置/宽度插值（目标在 render 里算；bar 宽或 fscale 变化时**快照不动画**，防 resize 拖尾）、
+  新 tab 原位 alpha 0→1（窗口首批 tab 不淡入）、关 tab alpha→0、
+  hover 背景渐变（close hover 保持瞬时，同 macOS）、变 active 的 tab 配色过渡（其它 tab 快照）
+- **文字 alpha 蒙版缓存**：标题以白字黑底经现有回调渲染一次（宽 = 200-8-22 逻辑 px），
+  取 G 通道 + 紧致包围盒；动画帧只逐像素 blend，不跑 FreeType。title/fscale/tab_h 变化时失效（重命名已实测）
+- **timer**：模块级单例 `addTimer` 16ms，有动画才 enable；tick 里对动画中的窗口
+  `wl_subsurface_set_desync` + `csd_change_title()`（desync 下子表面提交即时生效）；
+  全部结束后关 timer 并 `set_sync` 恢复（保 resize 原子性）。实测动画结束后进程 CPU 0.0%
+- 拖拽 DROP/DETACH 松手时把被拖 tab 的 move_x 置为 ghost 位置 → 新列表到达后从 ghost 滑入新 slot
+- `rounded_rect_coverage` 加内部像素快速路径（不跑 16 子采样）
+
+顺带（同日，用户要求）：
+- **窗口按钮重绘**：去 hover 圆底（含 close 红圆）、全不透明细线、chevron 臂 6.5/rise 0.4、
+  × 臂 5.5、线宽 1.4（hover 加粗 1.45×），对齐用户给的参考截图
+- **配色对齐 macOS**（用户报 tab 栏颜色对不上。根因：mac 用 `macos_titlebar_color dark`，
+  Wayland 读的是 `wayland_titlebar_color`，未设 → 跟随 kwin 浅色方案）：
+  kitty/glfw.c 的 `set_titlebar_tabs` 透传 `forced_appearance`（macos_titlebar_color 负值取负：1=light 2=dark），
+  `glfwWaylandSetTitlebarTabs` 加第 6 参（glfw.py 清单已改、wrapper 已重新生成）；
+  render_bar 非自定义色时用实测 macOS 标题栏色：深色聚焦 `#393A39`（vs macos.png 逐像素 ✓，
+  active tab #626366 ✓），未聚焦 #2C2C2C、浅色 #ECECEC/#F6F6F6 为近似值；
+  显式设置 `wayland_titlebar_color` 仍最优先
+- **底部窗口圆角**（GL 主表面，kwin 截图验证 ✓）：帧末 corner mask pass ——
+  新 shader `kitty/corner_mask_fragment.glsl`（circle SDF 输出 coverage，复用 `rounded_rect_vertex.glsl`），
+  `CORNER_MASK_PROGRAM` 注册（shaders.c 枚举 + C() 导出 + shaders.py 编译 + pyi）；
+  `stop_os_window_rendering()` 末尾调 `draw_bottom_corner_masks()`（`glBlendFunc(GL_ZERO, GL_SRC_ALPHA)`
+  把预乘像素乘以覆盖率，半径 10×scale 与 `WINDOW_TOP_CORNER_RADIUS` 一致）；
+  开关是 `OSWindow.wayland_titlebar_tabs_active`（set_titlebar_tabs 里置位）。
+  opaque region：`wl_window.c update_regions()` 挖掉两个 10×10 逻辑 px 角 +
+  `glfwWaylandSetTitlebarTabs` 里立即重设一次（update_regions 只在建窗/resize 跑）。
+  EGL surface 永远带 alpha（GLFW 默认 alphaBits=8），opacity==1 也能用
 
 ### Stage 4：拖拽与撕下
 20. **先读上游代码再动手**：上游已有完整的跨平台 tab 拖拽 ——

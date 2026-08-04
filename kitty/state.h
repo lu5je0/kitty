@@ -469,6 +469,7 @@ typedef struct OSWindow {
         double pending_pixels_x, pending_pixels_y;
         int last_v120_dir_x, last_v120_dir_y;
     } scroll;
+    bool wayland_titlebar_tabs_active;  // fork: draw rounded bottom corners
 } OSWindow;
 
 static inline float

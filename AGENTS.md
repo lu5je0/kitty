@@ -41,14 +41,19 @@
 | `kitty/options/parse.py`、`kitty/options/types.py` | 生成文件，由 `kitty +launch gen config` 重新生成，勿手改 |
 | `kitty/cocoa_window.m` | macOS 核心实现（"Titlebar tab bar" 折叠段，约 400 行）：`KittyTitlebarTabView`、`KittyTitlebarNewTabButton`、`KittyTitlebarTabBarView` 三个类 + `cocoa_update_titlebar_tabs()` 入口。含动画、hover 校准（防 tracking area 失效导致 hover 卡住）、`titlebarSeparatorStyle = None` 去除标题栏底部分隔线阴影 |
 | `kitty/cocoa_window.h` | `TitlebarTabInfo` 结构、五个新 `CocoaPendingAction` 枚举、函数声明 |
-| `kitty/glfw.c` | Python API `set_titlebar_tabs`（`NativeTabInfo` 宏共享 macOS/Wayland 解析循环）+ 注册到 module_methods；`titlebar_tab_text_callback` / `titlebar_tab_action_callback`（非 Apple 分支，在 `glfw_init` 里和 `glfwSetDrawTextFunction` 一起注册） |
+| `kitty/glfw.c` | Python API `set_titlebar_tabs`（`NativeTabInfo` 宏共享 macOS/Wayland 解析循环）+ 注册到 module_methods；`titlebar_tab_text_callback` / `titlebar_tab_action_callback`（非 Apple 分支，在 `glfw_init` 里和 `glfwSetDrawTextFunction` 一起注册）；Wayland 分支透传 `forced_appearance`（`macos_titlebar_color` light/dark）并置 `w->wayland_titlebar_tabs_active`（底部圆角开关） |
 | `kitty/child-monitor.c` | `process_cocoa_pending_actions` 中五个新 action 的 `call_boss` 转发 |
 | `kitty/boss.py` | `titlebar_tab_activate/close/new/drop/detach` 五个 handler |
 | `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`、`tab_bar_hidden` 计算、`apply_options` 配置重载支持 |
 | `kitty/fast_data_types.pyi` | `set_titlebar_tabs` 类型声明 |
 | `setup.py` | 链接 `-framework QuartzCore`（Core Animation 需要）；Info.plist 加 `UIDesignRequiresCompatibility`（见下） |
-| `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制（圆角矩形/×/+/hover 圆底）、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（首次调用时把该窗口 `visible_titlebar_height` 提到 28 并强制 CSD + 重建缓冲） |
+| `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（按 tab_id diff 保动画状态；强制 CSD、`visible_titlebar_height` 提到 28、立即重设 opaque region）。动画引擎：5 种 0.18s ease-out（位置/宽度、淡入/淡出、hover、变 active 配色）、文字 alpha 蒙版缓存、16ms 单例 timer + 动画期间 `wl_subsurface_set_desync`；非自定义色时用实测 macOS 标题栏色（深色聚焦 #393A39），`forced_appearance` 尊重 `macos_titlebar_color light/dark` |
 | `glfw/wl_client_side_decorations.c` | 仅加钩子：include 1 行、`render_title_bar()` 5 行（画 tab 后 `goto render_buttons`）、`update_hovered_button()` 1 行、`handle_pointer_button()` 1 行、`handle_pointer_leave()` 1 行、`csd_free_all_resources()` 1 行 |
+| `glfw/wl_window.c` | `update_regions()` 里 4 行：tabs 激活时 opaque region 挖掉底部两个 10×10 逻辑 px 角（配合 GL 圆角）；include 1 行 |
+| `kitty/shaders.c` | 枚举加 `CORNER_MASK_PROGRAM`、`C()` 导出 1 行、新 static `draw_bottom_corner_masks()`（帧末把底部两角像素乘以圆覆盖率，`GL_ZERO/GL_SRC_ALPHA`）+ `stop_os_window_rendering()` 末尾 1 行调用 |
+| `kitty/corner_mask_fragment.glsl` | **新文件，纯 fork 专属**：circle SDF coverage，复用 `rounded_rect_vertex.glsl` |
+| `kitty/shaders.py` | import + 1 行编译 `corner_mask` program |
+| `kitty/state.h` | `OSWindow` 尾部单独一行 `bool wayland_titlebar_tabs_active;` |
 | `glfw/glfw3.h` | preamble 加 `GLFWTitlebarTab`/`GLFWTitlebarTabAction`/两个回调 typedef（`} GLFWgamepadstate;` 之后）；GLFWAPI 声明区末尾加 `glfwSetTitlebarTab{Action,Text}Callback` |
 | `glfw/internal.h` | `_glfw.callbacks` 尾部加 `titlebar_tab_action` / `titlebar_tab_text` 两行 |
 | `glfw/input.c` | 文件末尾追加两个注册函数实现 |
@@ -71,7 +76,7 @@
 - 所有 tab 几何都存 **scaled px**（`round(fscale*x)` 命中），分数缩放下勿混逻辑坐标。
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。
 - 合并主干时 `glfw/wl_client_side_decorations.c` 的 6 处单行钩子要保留；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。
-- 动画（Stage 3）与拖拽/撕下（Stage 4）尚未实现，见 todo.md。
+- 动画已实现（同 macOS：0.18s ease-out ×5 种；见 wl_titlebar_tabs.c 的 Anim 引擎）。跨窗口拖拽（Stage 4，上游 mime 方案）尚未实现，见 todo.md。
 
 ## 特性：按 window 彻底禁用输入法
 

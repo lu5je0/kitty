@@ -2558,7 +2558,7 @@ typedef void (*glfwWaylandRedrawCSDWindowTitle_func)(GLFWwindow*);
 GFW_EXTERN glfwWaylandRedrawCSDWindowTitle_func glfwWaylandRedrawCSDWindowTitle_impl;
 #define glfwWaylandRedrawCSDWindowTitle glfwWaylandRedrawCSDWindowTitle_impl
 
-typedef void (*glfwWaylandSetTitlebarTabs_func)(GLFWwindow*, const GLFWTitlebarTab*, size_t, uint32_t, bool);
+typedef void (*glfwWaylandSetTitlebarTabs_func)(GLFWwindow*, const GLFWTitlebarTab*, size_t, uint32_t, bool, int);
 GFW_EXTERN glfwWaylandSetTitlebarTabs_func glfwWaylandSetTitlebarTabs_impl;
 #define glfwWaylandSetTitlebarTabs glfwWaylandSetTitlebarTabs_impl
 
