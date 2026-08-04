@@ -180,6 +180,21 @@ Detailed list of changes
 -------------------------------------
 
 
+0.48.3 [future]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Wayland: Fix the first movement of the scroll wheel after reversing direction
+  often not scrolling, with high resolution wheels such as the Logitech MX
+  Master 3 (:pull:`10306`)
+
+- Vertical tabs: Improve handling of multi-line tab titles. Controlled via two new options:
+  :opt:`tab_title_max_lines` and :opt:`tab_title_template` (:pull:`10303`)
+
+- Vertical tabs: Improve rendering of tabs when using the ``fade`` :opt:`tab_bar_style`
+
+- :opt:`remember_window_size` now also remembers window maximized state (:pull:`10308`)
+
+
 0.48.2 [2026-07-30]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -303,7 +318,7 @@ Detailed list of changes
 
 - ``kitten @ set-background-image``: Fix ``--layout=configured`` changing layout to centered instead (:iss:`10089`)
 
-- Splits layout: add an ``equalize`` action and an ``equalize_on_close`` option to redistribute split space proportionally (:iss:`3489`)
+- Splits layout: add an ``equalize`` action and an ``equalize_on_window_close`` option to redistribute split space proportionally (:iss:`3489`)
 
 - Fix matching var/env on tabs not working as expected (:iss:`10095`)
 

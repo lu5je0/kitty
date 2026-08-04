@@ -1570,7 +1570,7 @@ opt(
     'yes',
     option_type='to_bool',
     long_text="""
-If enabled, the :term:`OS Window <os_window>` size will be remembered so that
+If enabled, the :term:`OS Window <os_window>` size and maximize state will be remembered so that
 new instances of kitty will have the same size as the previous instance.
 If disabled, the :term:`OS Window <os_window>` will initially have size
 configured by initial_window_width/height, in pixels. You can use a suffix of
@@ -2210,6 +2210,48 @@ The maximum number of cells that can be used to render the text in a tab.
 A value of zero means that no limit is applied. For vertical tab bars, kitty
 uses a default sidebar width sized for about twenty title cells when this is
 left unset.
+""",
+)
+
+opt(
+    'tab_title_max_lines',
+    '1',
+    option_type='positive_int',
+    long_text="""
+The maximum number of lines each tab may occupy, for vertical tab bars only
+(see :opt:`tab_bar_edge`). Titles containing newlines are rendered over
+multiple lines, up to this limit; any remaining lines are dropped. A value of
+:code:`1` (the default) keeps every tab on a single line, so newlines in
+:opt:`tab_title_template` have no effect. Increase it to make room for
+multi-line titles, for example::
+
+    tab_title_max_lines 2
+    tab_title_template "{index}: {tab.active_exe}\\n{title}"
+
+Note that tabs are packed according to the number of lines each title actually
+uses, so a tab with a single-line title still occupies only one line even when
+this is greater than one.
+""",
+)
+
+opt(
+    'tab_title_wrap',
+    'no',
+    option_type='tab_title_wrap',
+    long_text="""
+Wrap tab titles that are too long to fit instead of truncating them, for
+vertical tab bars only (see :opt:`tab_bar_edge`). Can be :code:`no` (the
+default) to truncate with an ellipsis as before, :code:`yes` to wrap at the
+width of the tab bar, or a number to wrap at that many cells, for example::
+
+    tab_title_wrap yes
+    tab_title_wrap 20
+
+Wrapping is limited by :opt:`tab_title_max_lines`, so it has no visible effect
+while that is :code:`1`. When a title needs more lines than are allowed, the
+last line it is given is truncated with an ellipsis. Explicit newlines in
+:opt:`tab_title_template` still start a new line, and each of the resulting
+lines is wrapped independently.
 """,
 )
 
