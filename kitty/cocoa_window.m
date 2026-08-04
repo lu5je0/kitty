@@ -1597,6 +1597,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     [item release];
     [pb release];
     drag_in_progress = YES;
+    [self sendAction:TITLEBAR_TAB_ACTIVATE];
     [self.superview addSubview:self];  // lift the ghost above its siblings
 }
 
@@ -1789,6 +1790,8 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     NSString *payload = [sender.draggingPasteboard stringForType:KittyTitlebarTabPasteboardType];
     if (!payload) return NSDragOperationNone;
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
     self.drop_was_internal = NO;
     self.dragged_tab = nil;
     self.drag_index = NSNotFound;

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是 kitty 的个人 fork，基于上游 master（0.48.2 开发版）。包含一个自研特性和两处针对 macOS 26 的视觉修正。后续会定期合并上游主干，冲突时按下面的说明处理。
+本仓库是 kitty 的个人 fork，基于上游 master。包含一个自研特性和两处针对 macOS 26 的视觉修正。后续会定期合并上游主干，冲突时按下面的说明处理。
 
 ## 特性：macOS 原生标题栏 Tab 栏（macos_titlebar_tabs）
 
@@ -52,6 +52,12 @@
    - 其余文件冲突按上表理解语义手动合
 3. `./dev.sh build` 重新构建（需 Go 工具链；国内网络建议挂代理 `export https_proxy=...`）
 4. 验证：`open kitty/launcher/kitty.app`，检查 tab 点击/关闭/新建、窗口圆角、标题栏无分隔线阴影
+
+## 部署
+
+1. `./dev.sh build`
+2. `./deploy.sh` — 删除 `/Applications/kitty.app` 旧版，复制新版过去
+3. `open /Applications/kitty.app` 启动
 
 ## 用户配置（~/.dotfiles/kitty/）
 
