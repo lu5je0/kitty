@@ -62,6 +62,9 @@ typedef void* id;
  #define NSOpenGLContextParameterSurfaceOpacity NSOpenGLCPSurfaceOpacity
 #endif
 
+// Return 0 to let macOS process the key normally, 1 to suppress text generation
+// entirely, or 2 to bypass the IME while still generating text from the raw
+// keyboard layout.
 typedef int (* GLFWcocoatextinputfilterfun)(int,int,unsigned int, unsigned long);
 typedef bool (* GLFWapplicationshouldhandlereopenfun)(int);
 typedef bool (* GLFWhandleurlopen)(const char*);

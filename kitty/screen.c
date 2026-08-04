@@ -31,6 +31,7 @@
 #include "modes.h"
 #include "char-props.h"
 #include "wcswidth.h"
+#include "fork-ime.h"  // fork-local, see agents.md
 #include <stdalign.h>
 #include <stdio.h>
 #include "keys.h"
@@ -6436,6 +6437,7 @@ static PyGetSetDef getsetters[] = {
     GETSET(cursor_key_mode)
     GETSET(disable_ligatures)
     GETSET(render_unfocused_cursor)
+    {"ime_disabled", (getter)ime_disabled_get, NULL, NULL, NULL},  // fork-local, see fork-ime.h
     {NULL}  /* Sentinel */
 };
 

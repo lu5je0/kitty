@@ -1474,6 +1474,32 @@ filter_option(int key UNUSED, int mods, unsigned int native_key UNUSED, unsigned
     return 0;
 }
 
+// Fork-local: everything below wraps filter_option rather than editing it, so
+// upstream changes to filter_option merge cleanly. See agents.md.
+
+static bool
+ime_disabled_for_focused_window(void) {
+    // The filter callback gets no window pointer, but keyDown: only fires for the focused OS window
+    for (size_t o = 0; o < global_state.num_os_windows; o++) {
+        OSWindow *osw = global_state.os_windows + o;
+        if (!osw->is_focused || !osw->num_tabs) continue;
+        Tab *tab = osw->tabs + osw->active_tab;
+        if (!tab->num_windows) return false;
+        Screen *screen = tab->windows[tab->active_window].render_data.screen;
+        return screen && screen->modes.mDISABLE_IME;
+    }
+    return false;
+}
+
+static int
+cocoa_text_input_filter(int key, int mods, unsigned int native_key, unsigned long flags) {
+    // option-as-alt must win: it needs 1 (no text at all), whereas 2 would fall
+    // back to the keyboard layout and turn e.g. option+i into a dead-key char
+    if (OPT(macos_option_as_alt) && filter_option(key, mods, native_key, flags) == 1) return 1;
+    if (ime_disabled_for_focused_window()) return 2;
+    return 0;
+}
+
 static bool
 on_application_reopen(int has_visible_windows) {
     if (has_visible_windows) return true;
@@ -1947,7 +1973,7 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     w->last_focused_counter = ++focus_counter;
     os_window_update_size_increments(w);
 #ifdef __APPLE__
-    if (OPT(macos_option_as_alt)) glfwSetCocoaTextInputFilter(glfw_window, filter_option);
+    glfwSetCocoaTextInputFilter(glfw_window, cocoa_text_input_filter);
     glfwSetCocoaToggleFullscreenIntercept(glfw_window, intercept_cocoa_fullscreen);
     glfwCocoaSetWindowResizeCallback(glfw_window, cocoa_os_window_resized);
 #endif

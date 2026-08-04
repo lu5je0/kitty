@@ -13,6 +13,7 @@
 #include "control-codes.h"
 #include "state.h"
 #include "simd-string.h"
+#include "fork-ime.h"  // fork-local, see agents.md
 #include <stdalign.h>
 
 #define BUF_SZ (1024u*1024u)
@@ -539,6 +540,7 @@ dispatch_osc(PS *self, uint8_t *buf, size_t limit, bool is_extended_osc) {
         case 99:
         case 777:
         case 1337:
+            if (code == 1337 && fork_ime_handle_osc1337(self->screen, (char*)buf + i, limit - i)) break;  // fork-local
             START_DISPATCH
             DISPATCH_OSC_WITH_CODE(desktop_notify)
             END_DISPATCH

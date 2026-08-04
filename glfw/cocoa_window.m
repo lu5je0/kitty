@@ -1282,7 +1282,11 @@ is_ascii_control_char(char x) {
     const NSUInteger flags = [event modifierFlags];
     const int mods = translateFlags(flags);
     const uint32_t key = translateKey(keycode, true);
-    const bool process_text = !_glfw.ignoreOSKeyboardProcessing && (!window->ns.textInputFilterCallback || window->ns.textInputFilterCallback(key, mods, keycode, flags) != 1);
+    // A filter result of 1 suppresses text entirely, 2 bypasses the IME but
+    // still generates text from the raw keyboard layout below.
+    const int filter_result = window->ns.textInputFilterCallback ? window->ns.textInputFilterCallback(key, mods, keycode, flags) : 0;
+    const bool ime_disabled = filter_result == 2;
+    const bool process_text = !_glfw.ignoreOSKeyboardProcessing && filter_result != 1 && !ime_disabled;
     _glfw.ns.text[0] = 0;
     if (keycode == 0x33 /* backspace */ || keycode == 0x35 /* escape */ || (keycode == 0x04 /* h */ && mods == GLFW_MOD_CONTROL)) [self unmarkText];
     GLFWkeyevent glfw_keyevent = {.key = key, .native_key = keycode, .native_key_id = keycode, .action = GLFW_PRESS, .mods = mods};
@@ -1325,6 +1329,16 @@ is_ascii_control_char(char x) {
             in_key_handler = 0;
         } else {
             window->ns.deadKeyState = 0;
+            // UCKeyTranslate ignores command/control, so it returns the base
+            // character for key equivalents like cmd+i that macOS itself leaves
+            // textless. Generating text for those would send it to the child
+            // instead of the encoded key event.
+            if (ime_disabled && char_count && !(mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL))) {
+                // interpretKeyEvents: was skipped, so insertText: never ran; take the text from the keyboard layout
+                NSString *s = [NSString stringWithCharacters:text length:char_count];
+                if (s) strncpy(_glfw.ns.text, [s UTF8String], sizeof(_glfw.ns.text) - 1);
+                debug_input("ime disabled, text from keyboard layout: %s ", format_text(_glfw.ns.text));
+            }
         }
         if (window->ns.deadKeyState && (char_count == 0 || keycode == 0x75)) {
             // 0x75 is the delete key which needs to be ignored during a compose sequence
@@ -1387,7 +1401,8 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
     const uint32_t key = vk_code_to_functional_key_code([event keyCode]);
     const unsigned int keycode = [event keyCode];
     const int mods = translateFlags(modifierFlags);
-    const bool process_text = !_glfw.ignoreOSKeyboardProcessing && (!window->ns.textInputFilterCallback || window->ns.textInputFilterCallback(key, mods, keycode, modifierFlags) != 1);
+    const int filter_result = window->ns.textInputFilterCallback ? window->ns.textInputFilterCallback(key, mods, keycode, modifierFlags) : 0;
+    const bool process_text = !_glfw.ignoreOSKeyboardProcessing && filter_result != 1 && filter_result != 2;
     const char *mod_name = "unknown";
 
     // Code for handling modifier key events copied form SDL_cocoakeyboard.m, with thanks. See IsModifierKeyPressedFunction()
