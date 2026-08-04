@@ -358,23 +358,21 @@ canvas_composite_rounded(Canvas *dest, const Canvas *src, int x, int y, double r
 // Animation frames must not run FreeType; the title is rendered once as white
 // on black at the maximum tab width, its green channel kept as an alpha mask,
 // then every frame just blends fg through the mask.
-static void
-ensure_text_mask(_GLFWwindow *window, WaylandTabEntry *t, int tab_h, double fscale) {
-    const unsigned sz_px = (unsigned)round(TEXT_SIZE * fscale);
-    if (t->mask && t->mask_h == tab_h && t->mask_sz_px == sz_px) return;
-    free(t->mask); t->mask = NULL; t->mask_text_w = 0; t->mask_left = 0;
-    t->mask_h = tab_h; t->mask_sz_px = sz_px;
-    if (!t->title || !t->title[0] || !_glfw.callbacks.titlebar_tab_text) return;
-    const int mw = (int)round((TAB_MAX_WIDTH - TEXT_LEFT_PADDING - TEXT_RIGHT_MARGIN) * fscale);
-    if (mw <= 0 || tab_h <= 0) return;
+
+// Renders text into a fresh alpha mask of mw x tab_h px. On success stores the
+// mask and its tight horizontal bounds. Returns false when nothing was drawn.
+static bool
+build_text_mask(_GLFWwindow *window, const char *text, unsigned sz_px, int mw, int tab_h, uint8_t **mask_out, int *left_out, int *text_w_out) {
+    *mask_out = NULL; *left_out = 0; *text_w_out = 0;
+    if (!text || !text[0] || !_glfw.callbacks.titlebar_tab_text || mw <= 0 || tab_h <= 0) return false;
     uint32_t *scratch = malloc((size_t)mw * tab_h * sizeof(uint32_t));
-    if (!scratch) return;
+    if (!scratch) return false;
     for (size_t i = 0; i < (size_t)mw * tab_h; i++) scratch[i] = 0xff000000u;
     if (!_glfw.callbacks.titlebar_tab_text(
-            (GLFWwindow*)window, t->title, sz_px, 0xffffffffu, 0xff000000u,
-            (uint8_t*)scratch, mw, tab_h, 0, 0, 0)) { free(scratch); return; }
+            (GLFWwindow*)window, text, sz_px, 0xffffffffu, 0xff000000u,
+            (uint8_t*)scratch, mw, tab_h, 0, 0, 0)) { free(scratch); return false; }
     uint8_t *mask = malloc((size_t)mw * tab_h);
-    if (!mask) { free(scratch); return; }
+    if (!mask) { free(scratch); return false; }
     int left = mw, right = -1;
     for (int y = 0; y < tab_h; y++) {
         for (int x = 0; x < mw; x++) {
@@ -384,30 +382,74 @@ ensure_text_mask(_GLFWwindow *window, WaylandTabEntry *t, int tab_h, double fsca
         }
     }
     free(scratch);
-    if (right < left) { free(mask); return; }  // empty rendering
-    t->mask = mask; t->mask_w = mw;
-    t->mask_left = left; t->mask_text_w = right - left + 1;
+    if (right < left) { free(mask); return false; }  // empty rendering
+    *mask_out = mask; *left_out = left; *text_w_out = right - left + 1;
+    return true;
 }
 
 static void
-draw_cached_text(Canvas *tab, WaylandTabEntry *t, uint32_t fg, double fscale) {
-    if (!t->mask || !t->mask_text_w) return;
-    const int box_x = (int)round(TEXT_LEFT_PADDING * fscale);
-    const int box_w = tab->width - box_x - (int)round(TEXT_RIGHT_MARGIN * fscale);
-    if (box_w <= 0) return;
-    const int dst_left = box_x + (t->mask_text_w < box_w ? (box_w - t->mask_text_w) / 2 : 0);
-    const int h = tab->height < t->mask_h ? tab->height : t->mask_h;
-    const uint32_t fg_argb = 0xff000000u | fg;
+ensure_text_mask(_GLFWwindow *window, WaylandTabEntry *t, int tab_h, double fscale) {
+    const unsigned sz_px = (unsigned)round(TEXT_SIZE * fscale);
+    if (t->mask && t->mask_h == tab_h && t->mask_sz_px == sz_px) return;
+    free(t->mask); t->mask = NULL; t->mask_text_w = 0; t->mask_left = 0;
+    t->mask_h = tab_h; t->mask_sz_px = sz_px;
+    const int mw = (int)round((TAB_MAX_WIDTH - TEXT_LEFT_PADDING - TEXT_RIGHT_MARGIN) * fscale);
+    if (build_text_mask(window, t->title, sz_px, mw, tab_h, &t->mask, &t->mask_left, &t->mask_text_w)) t->mask_w = mw;
+}
+
+// Single cached ellipsis glyph mask, used for macOS-style tail truncation.
+static struct {
+    uint8_t *mask;
+    int w, h, left, text_w;
+    unsigned sz_px;
+} ellipsis_cache;
+
+static bool
+ensure_ellipsis_mask(_GLFWwindow *window, int tab_h, unsigned sz_px) {
+    if (ellipsis_cache.mask && ellipsis_cache.h == tab_h && ellipsis_cache.sz_px == sz_px) return true;
+    free(ellipsis_cache.mask); memset(&ellipsis_cache, 0, sizeof(ellipsis_cache));
+    ellipsis_cache.h = tab_h; ellipsis_cache.sz_px = sz_px;
+    const int mw = 4 * (int)sz_px;
+    if (build_text_mask(window, "…", sz_px, mw, tab_h, &ellipsis_cache.mask, &ellipsis_cache.left, &ellipsis_cache.text_w))
+        ellipsis_cache.w = mw;
+    return ellipsis_cache.mask != NULL;
+}
+
+static void
+blend_mask_columns(Canvas *tab, const uint8_t *mask, int mask_stride, int mask_left, int cols, int dst_left, int clip_right, uint32_t fg_argb, int h) {
     for (int y = 0; y < h; y++) {
         uint32_t *row = tab->px + (size_t)y * tab->width;
-        const uint8_t *mrow = t->mask + (size_t)y * t->mask_w + t->mask_left;
-        for (int i = 0; i < t->mask_text_w; i++) {
+        const uint8_t *mrow = mask + (size_t)y * mask_stride + mask_left;
+        for (int i = 0; i < cols; i++) {
             const int x = dst_left + i;
-            if (x >= box_x + box_w || x >= tab->width) break;
+            if (x >= clip_right || x >= tab->width) break;
             const uint8_t a = mrow[i];
             if (a) row[x] = blend_argb(row[x], fg_argb, a / 255.);
         }
     }
+}
+
+static void
+draw_cached_text(_GLFWwindow *window, Canvas *tab, WaylandTabEntry *t, uint32_t fg, double fscale) {
+    if (!t->mask || !t->mask_text_w) return;
+    const int box_x = (int)round(TEXT_LEFT_PADDING * fscale);
+    const int box_w = tab->width - box_x - (int)round(TEXT_RIGHT_MARGIN * fscale);
+    if (box_w <= 0) return;
+    const int h = tab->height < t->mask_h ? tab->height : t->mask_h;
+    const uint32_t fg_argb = 0xff000000u | fg;
+    if (t->mask_text_w <= box_w) {  // fits: centered
+        const int dst_left = box_x + (box_w - t->mask_text_w) / 2;
+        blend_mask_columns(tab, t->mask, t->mask_w, t->mask_left, t->mask_text_w, dst_left, box_x + box_w, fg_argb, h);
+        return;
+    }
+    // overflow: macOS-style tail truncation with an ellipsis
+    int avail = box_w;
+    const bool have_ell = ensure_ellipsis_mask(window, t->mask_h, t->mask_sz_px);
+    if (have_ell && ellipsis_cache.text_w < avail) avail -= ellipsis_cache.text_w;
+    blend_mask_columns(tab, t->mask, t->mask_w, t->mask_left, avail, box_x, box_x + avail, fg_argb, h);
+    if (have_ell && ellipsis_cache.text_w <= box_w - avail)
+        blend_mask_columns(tab, ellipsis_cache.mask, ellipsis_cache.w, ellipsis_cache.left, ellipsis_cache.text_w,
+                box_x + avail, box_x + box_w, fg_argb, h);
 }
 // }}}
 
@@ -436,7 +478,7 @@ render_one_tab(_GLFWwindow *window, WaylandTabEntry *t, Canvas *bar, double fsca
 
     // title text, centered, in the box (8, *, w - 8 - 22, full height)
     ensure_text_mask(window, t, t->h, fscale);
-    draw_cached_text(&tab, t, fg, fscale);
+    draw_cached_text(window, &tab, t, fg, fscale);
 
     // close button: rect is (w-20, (h-14)/2, 14, 14) in logical units
     const double close_x = t->w - CLOSE_RECT_RIGHT_OFFSET * fscale, close_size = CLOSE_RECT_SIZE * fscale;

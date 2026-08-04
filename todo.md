@@ -224,6 +224,9 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
   opaque region：`wl_window.c update_regions()` 挖掉两个 10×10 逻辑 px 角 +
   `glfwWaylandSetTitlebarTabs` 里立即重设一次（update_regions 只在建窗/resize 跑）。
   EGL surface 永远带 alpha（GLFW 默认 alphaBits=8），opacity==1 也能用
+- **标题尾部截断加省略号**（kwin 截图验证 ✓ `…trunca…`）：溢出时不再硬裁剪，
+  文字画到 `box_w - ell_w` 后接缓存的 `…` 蒙版（`ellipsis_cache` 按 sz_px/tab_h 全局缓存一份），
+  对齐 macOS 的 NSLineBreakByTruncatingTail
 
 ### Stage 4：拖拽与撕下
 20. **先读上游代码再动手**：上游已有完整的跨平台 tab 拖拽 ——
