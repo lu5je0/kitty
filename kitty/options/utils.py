@@ -1876,3 +1876,10 @@ def deprecated_scrollback_indicator_opacity(key: str, val: str, ans: dict[str, A
         ans['scrollbar'] = 'never'
     else:
         ans['scrollbar_handle_opacity'] = op
+
+
+def deprecated_macos_titlebar_tabs_alias(key: str, val: str, ans: dict[str, Any]) -> None:
+    if not hasattr(deprecated_macos_titlebar_tabs_alias, key):
+        setattr(deprecated_macos_titlebar_tabs_alias, key, True)
+        log_error(f'The option {key} is deprecated. Use native_titlebar_tabs instead.')
+    ans['native_titlebar_tabs'] = to_bool(val)

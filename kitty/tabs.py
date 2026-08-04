@@ -26,7 +26,6 @@ from .fast_data_types import (
     add_tab,
     attach_window,
     buffer_keys_in_window,
-    cocoa_set_titlebar_tabs,
     current_focused_os_window_id,
     detach_window,
     draw_single_line_of_text,
@@ -50,6 +49,7 @@ from .fast_data_types import (
     set_active_window,
     set_redirect_keys_to_overlay,
     set_tab_being_dragged,
+    set_titlebar_tabs,
     set_window_being_dragged,
     start_drag_with_data,
     swap_tabs,
@@ -67,6 +67,12 @@ from .window_list import WindowList
 
 P = ParamSpec('P')
 T = TypeVar('T')
+
+
+def native_titlebar_tabs_supported() -> bool:
+    # X11 has no client side decorations, so there is no titlebar kitty can draw into.
+    # TODO(wayland): return is_macos or is_wayland() once glfw/wl_titlebar_tabs.c lands
+    return is_macos
 
 
 def update_tab_bar_visibility(func: Callable[Concatenate['TabManager', P], T]) -> Callable[Concatenate['TabManager', P], T]:
@@ -1323,10 +1329,10 @@ class TabManager:  # {{{
 
     @property
     def use_native_titlebar_tabs(self) -> bool:
-        return is_macos and get_options().macos_titlebar_tabs
+        return native_titlebar_tabs_supported() and get_options().native_titlebar_tabs
 
     def update_native_titlebar_tabs(self) -> None:
-        if not is_macos:
+        if not native_titlebar_tabs_supported():
             return
         if self.use_native_titlebar_tabs:
             opts = get_options()
@@ -1341,10 +1347,10 @@ class TabManager:  # {{{
                     fg = t.inactive_fg if t.inactive_fg is not None else color_as_int(opts.inactive_tab_foreground)
                     bg = t.inactive_bg if t.inactive_bg is not None else color_as_int(opts.inactive_tab_background)
                 data.append((t.tab_id, t.title, t.is_active, t.needs_attention, fg, bg))
-            cocoa_set_titlebar_tabs(self.os_window_id, tuple(data))
+            set_titlebar_tabs(self.os_window_id, tuple(data))
             self.native_titlebar_tabs_shown = True
         elif self.native_titlebar_tabs_shown:
-            cocoa_set_titlebar_tabs(self.os_window_id, ())
+            set_titlebar_tabs(self.os_window_id, ())
             self.native_titlebar_tabs_shown = False
 
     def mark_tab_bar_dirty(self) -> None:

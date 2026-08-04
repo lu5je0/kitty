@@ -2528,7 +2528,7 @@ cocoa_minimize_os_window(PyObject UNUSED *self, PyObject *args) {
 }
 
 static PyObject*
-cocoa_set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
+set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
     unsigned long long os_window_id = 0;
     PyObject *tabs;
     if (!PyArg_ParseTuple(args, "KO!", &os_window_id, &PyTuple_Type, &tabs)) return NULL;
@@ -2549,7 +2549,8 @@ cocoa_set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
     }
     cocoa_update_titlebar_tabs(window, os_window_id, tinfo, count);
 #else
-    PyErr_SetString(PyExc_RuntimeError, "cocoa_set_titlebar_tabs() is only supported on macOS");
+    // TODO(wayland): forward to glfwWaylandSetTitlebarTabs once glfw/wl_titlebar_tabs.c lands
+    PyErr_SetString(PyExc_RuntimeError, "set_titlebar_tabs() is not implemented on this platform");
     return NULL;
 #endif
     Py_RETURN_NONE;
@@ -3354,7 +3355,7 @@ static PyMethodDef module_methods[] = {
     METHODB(cocoa_hide_app, METH_NOARGS),
     METHODB(cocoa_hide_other_apps, METH_NOARGS),
     METHODB(cocoa_minimize_os_window, METH_VARARGS),
-    METHODB(cocoa_set_titlebar_tabs, METH_VARARGS),
+    METHODB(set_titlebar_tabs, METH_VARARGS),
     {"glfw_init", (PyCFunction)glfw_init, METH_VARARGS, ""},
     {"glfw_terminate", (PyCFunction)glfw_terminate, METH_NOARGS, ""},
     {"glfw_get_physical_dpi", (PyCFunction)glfw_get_physical_dpi, METH_NOARGS, ""},
