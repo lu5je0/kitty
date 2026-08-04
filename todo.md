@@ -5,6 +5,11 @@
 
 > **前提**：字体渲染和红绿灯（窗口按钮）的差异已被明确接受，不追求一致。
 > 其余（几何、圆角、配色、动画时长与曲线、交互行为）要求逐项对齐。
+> 用户后续追加的偏好：第一个 tab 距左缘 8px（不再是 0）；窗口按钮用 KDE 尺寸的紧凑风格。
+
+**当前状态（2026-08-04，commit `bf6d4b04f` 已推送 origin）**：Stage 1、Stage 2 完成并在 kwin 真机
+截图验证（颜色逐像素对齐 macos.png），外加栏内拖动重排/撕下、紧凑窗口按钮、窗口顶角圆角。
+剩余：Stage 3 动画、跨窗口拖拽（上游 mime 方案）、mutter/sway 实测、底部窗口圆角（GL 主表面）。
 
 ---
 
@@ -21,9 +26,8 @@
 | `kitty/fast_data_types.pyi` | 同步重命名 |
 | `kitty/tabs.py` | 新增模块级 `native_titlebar_tabs_supported()`；`use_native_titlebar_tabs` 改读新选项；调用点改 `set_titlebar_tabs` |
 
-**故意留的一处 TODO**：`kitty/tabs.py` 的 `native_titlebar_tabs_supported()` 目前 `return is_macos`。
-Wayland 渲染器落地后改成 `return is_macos or is_wayland()`，并把 `is_wayland` 加回 `from .constants import` 那行。
-现在不改是为了避免中间状态下在 Wayland 开了选项 → 网格 tab bar 被隐藏但又没有原生 tab 栏画出来（等于完全没有 tab 栏）。
+**故意留的一处 TODO（已解决）**：`kitty/tabs.py` 的 `native_titlebar_tabs_supported()` 已改回
+`return is_macos or is_wayland()`（Wayland 渲染器已落地）。
 
 顺带：`~/.dotfiles/kitty/macos.conf` 里还是 `macos_titlebar_tabs yes`，走 alias 仍生效，有空改成 `native_titlebar_tabs yes`（那是另一个仓库）。
 
@@ -36,7 +40,7 @@ Wayland 渲染器落地后改成 `return is_macos or is_wayland()`，并把 `is_
 kTabMaxWidth      200      kTabMinWidth   60
 kTabHeight        24       kTabSpacing    4
 kTabCornerRadius  6        kNewTabButtonWidth 28
-kTabBarLeftMargin 84       (让位红绿灯；Wayland 上左边距 0，按钮在右侧)
+kTabBarLeftMargin 84       (让位红绿灯；Wayland 上左边距 8（用户要求），按钮在右侧)
 右内边距          8        (trailingAnchor constant:-8)
 kTabAnimationDuration 0.18 曲线 ease-out
 kTabDetachMargin  40       (撕下阈值)
