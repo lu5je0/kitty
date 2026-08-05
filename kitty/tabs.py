@@ -17,7 +17,7 @@ from typing import Any, Concatenate, Deque, Literal, NamedTuple, Optional, Param
 from .borders import Border, Borders
 from .child import Child
 from .cli_stub import CLIOptions, SaveAsSessionOptions
-from .constants import appname, is_macos
+from .constants import appname, is_macos, is_wayland
 from .fast_data_types import (
     GLFW_MOUSE_BUTTON_LEFT,
     GLFW_MOUSE_BUTTON_MIDDLE,
@@ -71,8 +71,7 @@ T = TypeVar('T')
 
 def native_titlebar_tabs_supported() -> bool:
     # X11 has no client side decorations, so there is no titlebar kitty can draw into.
-    # TODO(wayland): return is_macos or is_wayland() once glfw/wl_titlebar_tabs.c lands
-    return is_macos
+    return is_macos or is_wayland()
 
 
 def update_tab_bar_visibility(func: Callable[Concatenate['TabManager', P], T]) -> Callable[Concatenate['TabManager', P], T]:

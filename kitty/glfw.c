@@ -1134,6 +1134,49 @@ draw_text_callback(GLFWwindow *window, const char *text, uint32_t fg, uint32_t b
     return ok;
 }
 
+static bool
+titlebar_tab_text_callback(GLFWwindow *window, const char *text, unsigned int sz_px, uint32_t fg, uint32_t bg, uint8_t *output_buf, size_t width, size_t height, float x_offset, float y_offset, size_t right_margin) {
+    if (!set_callback_window(window)) return false;
+    FreeTypeRenderCtx ctx;
+    if (!(ctx = freetype_render_ctx(false))) return false;
+    // center the title in the available area, like the macOS titlebar tabs
+    size_t avail = width > (size_t)x_offset + right_margin ? width - (size_t)x_offset - right_margin : 0;
+    size_t text_w = freetype_text_width_for_single_line(ctx, text, sz_px);
+    if (text_w && text_w < avail) x_offset += (float)(avail - text_w) / 2.f;
+    bool ok = render_single_line(ctx, text, sz_px, fg, bg, output_buf, width, height, x_offset, y_offset, right_margin, false);
+    if (!ok && PyErr_Occurred()) PyErr_Print();
+    return ok;
+}
+
+static void
+titlebar_tab_action_callback(GLFWwindow *window, GLFWTitlebarTabAction action, unsigned long long tab_id, int index) {
+    if (!set_callback_window(window)) return;
+    unsigned long long os_window_id = global_state.callback_os_window->id;
+    char payload[128];
+    switch (action) {
+        case GLFW_TITLEBAR_TAB_ACTIVATE:
+            snprintf(payload, sizeof(payload), "%llu %llu", os_window_id, tab_id);
+            call_boss(titlebar_tab_activate, "s", payload);
+            break;
+        case GLFW_TITLEBAR_TAB_CLOSE:
+            snprintf(payload, sizeof(payload), "%llu %llu", os_window_id, tab_id);
+            call_boss(titlebar_tab_close, "s", payload);
+            break;
+        case GLFW_TITLEBAR_TAB_NEW:
+            snprintf(payload, sizeof(payload), "%llu 0", os_window_id);
+            call_boss(titlebar_tab_new, "s", payload);
+            break;
+        case GLFW_TITLEBAR_TAB_DROP:
+            snprintf(payload, sizeof(payload), "%llu %llu %llu %d", os_window_id, tab_id, os_window_id, index);
+            call_boss(titlebar_tab_drop, "s", payload);
+            break;
+        case GLFW_TITLEBAR_TAB_DETACH:
+            snprintf(payload, sizeof(payload), "%llu %llu", os_window_id, tab_id);
+            call_boss(titlebar_tab_detach, "s", payload);
+            break;
+    }
+}
+
 bool
 draw_window_title(double font_sz_pts, double ydpi, const char *text, color_type fg, color_type bg, uint8_t *output_buf, size_t width, size_t height, size_t *actual_width) {
     FreeTypeRenderCtx ctx;
@@ -2197,6 +2240,8 @@ glfw_init(PyObject UNUSED *self, PyObject *args) {
         glfwSetCocoaURLOpenCallback(apple_url_open_callback);
 #else
         glfwSetDrawTextFunction(draw_text_callback);
+        glfwSetTitlebarTabActionCallback(titlebar_tab_action_callback);
+        glfwSetTitlebarTabTextCallback(titlebar_tab_text_callback);
 #endif
         get_window_dpi(NULL, &global_state.default_dpi.x, &global_state.default_dpi.y);
         edge_spacing_func = edge_sf; Py_INCREF(edge_spacing_func);
@@ -2533,13 +2578,14 @@ set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
     PyObject *tabs;
     if (!PyArg_ParseTuple(args, "KO!", &os_window_id, &PyTuple_Type, &tabs)) return NULL;
 #ifdef __APPLE__
+#define NativeTabInfo TitlebarTabInfo
+#else
+#define NativeTabInfo GLFWTitlebarTab
+#endif
     OSWindow *w = os_window_for_id(os_window_id);
     if (!w || !w->handle || w->is_layer_shell) Py_RETURN_NONE;
-    if (!glfwGetCocoaWindow) { PyErr_SetString(PyExc_RuntimeError, "Failed to load glfwGetCocoaWindow"); return NULL; }
-    void *window = glfwGetCocoaWindow(w->handle);
-    if (!window) Py_RETURN_NONE;
     size_t count = PyTuple_GET_SIZE(tabs);
-    RAII_ALLOC(TitlebarTabInfo, tinfo, count ? calloc(count, sizeof(TitlebarTabInfo)) : NULL);
+    RAII_ALLOC(NativeTabInfo, tinfo, count ? calloc(count, sizeof(NativeTabInfo)) : NULL);
     if (count && !tinfo) return PyErr_NoMemory();
     for (size_t i = 0; i < count; i++) {
         PyObject *t = PyTuple_GET_ITEM(tabs, i);
@@ -2547,12 +2593,19 @@ set_titlebar_tabs(PyObject UNUSED *self, PyObject *args) {
         if (!PyArg_ParseTuple(t, "KsppII", &tinfo[i].tab_id, &tinfo[i].title, &is_active, &needs_attention, &tinfo[i].fg, &tinfo[i].bg)) return NULL;
         tinfo[i].is_active = is_active; tinfo[i].needs_attention = needs_attention;
     }
+#ifdef __APPLE__
+    if (!glfwGetCocoaWindow) { PyErr_SetString(PyExc_RuntimeError, "Failed to load glfwGetCocoaWindow"); return NULL; }
+    void *window = glfwGetCocoaWindow(w->handle);
+    if (!window) Py_RETURN_NONE;
     cocoa_update_titlebar_tabs(window, os_window_id, tinfo, count);
 #else
-    // TODO(wayland): forward to glfwWaylandSetTitlebarTabs once glfw/wl_titlebar_tabs.c lands
-    PyErr_SetString(PyExc_RuntimeError, "set_titlebar_tabs() is not implemented on this platform");
-    return NULL;
+    if (global_state.is_wayland && glfwWaylandSetTitlebarTabs) {
+        w->wayland_titlebar_tabs_active = count > 0;
+        glfwWaylandSetTitlebarTabs(w->handle, tinfo, count, w->last_window_chrome.color, w->last_window_chrome.use_system_color,
+                OPT(macos_titlebar_color) < 0 ? (int)-OPT(macos_titlebar_color) : 0);
+    }
 #endif
+#undef NativeTabInfo
     Py_RETURN_NONE;
 }
 

@@ -19,6 +19,7 @@ from .fast_data_types import (
     COLOR_IS_RGB,
     COLOR_IS_SPECIAL,
     COLOR_NOT_SET,
+    CORNER_MASK_PROGRAM,
     DECORATION,
     DECORATION_MASK,
     DIM,
@@ -224,6 +225,8 @@ class LoadShaderPrograms:
         program_for('blit').compile(BLIT_PROGRAM, allow_recompile)
         program_for('screenshot').compile(SCREENSHOT_PROGRAM, allow_recompile)
         program_for('rounded_rect').compile(ROUNDED_RECT_PROGRAM, allow_recompile)
+        # fork: rounded bottom corners for Wayland titlebar tabs
+        Program('corner_mask', vertex_name='rounded_rect_vertex.glsl').compile(CORNER_MASK_PROGRAM, allow_recompile)
         init_cell_program()
 
 
