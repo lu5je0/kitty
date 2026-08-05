@@ -227,6 +227,15 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 - **标题尾部截断加省略号**（kwin 截图验证 ✓ `…trunca…`）：溢出时不再硬裁剪，
   文字画到 `box_w - ell_w` 后接缓存的 `…` 蒙版（`ellipsis_cache` 按 sz_px/tab_h 全局缓存一份），
   对齐 macOS 的 NSLineBreakByTruncatingTail
+- **拖拽闪动修复**（用户实测反馈）：sync（指针路径随父表面上屏）与 desync（timer 即时上屏）
+  提交交错导致新旧缓冲乱序显示。改为 tab 栏激活期间子表面**常驻 desync**（render_bar 里按
+  `desynced_subsurface` 指针变化重申，子表面重建后自动恢复），不再来回切换。
+  代价：resize 时标题栏与主表面原子性略降，可接受
+- **离屏动画 harness**（`.wl-test/anim_harness.c`，不提交）：假时钟（替身 `monotonic_()`）驱动
+  wl_titlebar_tabs.c 真实代码，10 项断言：初始布局配色、hover 渐入/渐出中间值、拖拽激活、
+  DROP index、重排滑入中间帧与收敛、垂死 tab 淡出与 reap、timer 自动停。
+  编译：`gcc -D_GLFW_WAYLAND -DHAS_MEMFD_CREATE -I../glfw -I.. anim_harness.c ../glfw/wl_titlebar_tabs.c
+  $(pkg-config --cflags dbus-1 xkbcommon) $(pkg-config --cflags --libs wayland-client) -lm`
 
 ### Stage 4：拖拽与撕下
 20. **先读上游代码再动手**：上游已有完整的跨平台 tab 拖拽 ——
