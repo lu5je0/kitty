@@ -7,9 +7,13 @@
 > 其余（几何、圆角、配色、动画时长与曲线、交互行为）要求逐项对齐。
 > 用户后续追加的偏好：第一个 tab 距左缘 8px（不再是 0）；窗口按钮用 KDE 尺寸的紧凑风格。
 
-**当前状态（2026-08-04，commit `bf6d4b04f` 已推送 origin）**：Stage 1、Stage 2 完成并在 kwin 真机
-截图验证（颜色逐像素对齐 macos.png），外加栏内拖动重排/撕下、紧凑窗口按钮、窗口顶角圆角。
-剩余：Stage 3 动画、跨窗口拖拽（上游 mime 方案）、mutter/sway 实测、底部窗口圆角（GL 主表面）。
+**当前状态（2026-08-05，最新提交已推送 origin）**：Stage 1-3 全部完成并验证 ——
+静态渲染 + 命中/点击语义（Stage 2）、5 种 0.18s ease-out 动画（真机中间帧 + `.wl-test/anim_harness.c`
+离屏 10 项断言）、配色逐像素对齐 macos.png（bar #393A39 / active tab #626366，`forced_appearance`
+尊重 `macos_titlebar_color dark`）、四角圆角（顶角 CSD、底角 GL corner mask）、标题省略号截断、
+拖拽闪动修复（常驻 desync）、紧凑窗口按钮（无圆底细线风格，chevron 臂 5.0 / × 臂 4.5）。
+剩余：hover/拖拽滑入人工确认、跨窗口拖拽（Stage 4，上游 mime 方案）、mutter/sway 实测、分数缩放实测。
+ghost 拖出栏外跟随 Y 已确认**不做**（见"已知会退化的点"）。
 
 ---
 
@@ -231,7 +235,7 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
   提交交错导致新旧缓冲乱序显示。改为 tab 栏激活期间子表面**常驻 desync**（render_bar 里按
   `desynced_subsurface` 指针变化重申，子表面重建后自动恢复），不再来回切换。
   代价：resize 时标题栏与主表面原子性略降，可接受
-- **离屏动画 harness**（`.wl-test/anim_harness.c`，不提交）：假时钟（替身 `monotonic_()`）驱动
+- **离屏动画 harness**（`.wl-test/anim_harness.c`，已随仓库提交）：假时钟（替身 `monotonic_()`）驱动
   wl_titlebar_tabs.c 真实代码，10 项断言：初始布局配色、hover 渐入/渐出中间值、拖拽激活、
   DROP index、重排滑入中间帧与收敛、垂死 tab 淡出与 reap、timer 自动停。
   编译：`gcc -D_GLFW_WAYLAND -DHAS_MEMFD_CREATE -I../glfw -I.. anim_harness.c ../glfw/wl_titlebar_tabs.c
