@@ -24,6 +24,8 @@ void _glfwInputError(int code UNUSED, const char *fmt UNUSED, ...) {}
 bool csd_should_window_be_decorated(_GLFWwindow *w UNUSED) { return true; }
 void csd_set_visible(_GLFWwindow *w UNUSED, bool v UNUSED) {}
 bool csd_set_titlebar_color(_GLFWwindow *w UNUSED, uint32_t c UNUSED, bool s UNUSED) { return false; }
+// corner shadow patches never build here (no titlebar surface / shadow tile)
+int createAnonymousFile(off_t size UNUSED) { return -1; }
 
 #define BAR_W 800
 #define BAR_H 28
@@ -164,21 +166,35 @@ int main(void) {
     fake_now += ms_to_monotonic_t(300ll); render();
     CHECK(cdist(px(312, 14), C1) <= 2, "hover faded back, got %06x", px(312, 14));
 
-    // --- drag tab0 to the end, DROP, then reorder slides tabs ---
+    // --- drag tab0 to the end: tabs reorder live once the ghost passes their
+    // midpoints (same as macOS), then DROP commits the already-final order ---
     wl_titlebar_tabs_handle_button(&test_window, 0x110 /*BTN_LEFT*/, 1 /*pressed*/, 108, 14);
     wl_titlebar_tabs_handle_motion(&test_window, 500, 14);  // exceeds threshold, ghost_x = 400
     CHECK(last_action == GLFW_TITLEBAR_TAB_ACTIVATE && last_action_tab == 1, "drag start activates tab");
+    render();  // starts the live reorder slide
+    fake_now += ms_to_monotonic_t(10ll); render();
+    CHECK(cdist(px(108, 14), C1) > 10, "slot0 should not yet be tab1's colour mid-slide, got %06x", px(108, 14));
+    fake_now += ms_to_monotonic_t(300ll); render();
+    CHECK(cdist(px(108, 14), C1) <= 2, "live reorder: slot0 shows tab1 while still dragging, got %06x", px(108, 14));
+    CHECK(cdist(px(312, 14), C2) <= 2, "live reorder: slot1 shows tab2 while still dragging, got %06x", px(312, 14));
+    CHECK(cdist(px(500, 14), C0) <= 2, "ghost follows the cursor, got %06x", px(500, 14));
     wl_titlebar_tabs_handle_button(&test_window, 0x110, 0 /*released*/, 500, 14);
     CHECK(last_action == GLFW_TITLEBAR_TAB_DROP && last_action_tab == 1 && last_action_index == 2,
           "drop at end, got action %d tab %llu idx %d", last_action, last_action_tab, last_action_index);
     set_tabs3(2, 3, 1);  // what kitty would send back
-    render();  // starts the move animations
-    fake_now += ms_to_monotonic_t(10ll); render();
-    CHECK(cdist(px(108, 14), C1) > 10, "slot0 should not yet be tab1's colour mid-slide, got %06x", px(108, 14));
+    render();  // the dragged tab slides from the ghost position into its slot
     fake_now += ms_to_monotonic_t(300ll); render();
     CHECK(cdist(px(108, 14), C1) <= 2, "slot0 settled to old tab1, got %06x", px(108, 14));
     CHECK(cdist(px(312, 14), C2) <= 2, "slot1 settled to old tab2, got %06x", px(312, 14));
     CHECK(cdist(px(516, 14), C0) <= 2, "slot2 settled to dragged tab0, got %06x", px(516, 14));
+
+    // --- drag far below the bar and release: DETACH ---
+    wl_titlebar_tabs_handle_button(&test_window, 0x110, 1, 108, 14);
+    wl_titlebar_tabs_handle_motion(&test_window, 108, 120);  // 120 > bar 28 + margin 40
+    wl_titlebar_tabs_handle_button(&test_window, 0x110, 0, 108, 120);
+    CHECK(last_action == GLFW_TITLEBAR_TAB_DETACH && last_action_tab == 2,
+          "detach below bar, got action %d tab %llu", last_action, last_action_tab);
+    fake_now += ms_to_monotonic_t(300ll); render();
 
     // --- closing a tab fades it out and reaps it ---
     {

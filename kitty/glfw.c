@@ -1174,6 +1174,10 @@ titlebar_tab_action_callback(GLFWwindow *window, GLFWTitlebarTabAction action, u
             snprintf(payload, sizeof(payload), "%llu %llu", os_window_id, tab_id);
             call_boss(titlebar_tab_detach, "s", payload);
             break;
+        case GLFW_TITLEBAR_TAB_DRAG_OUT:
+            snprintf(payload, sizeof(payload), "%llu %llu", os_window_id, tab_id);
+            call_boss(titlebar_tab_drag_out, "s", payload);
+            break;
     }
 }
 

@@ -111,6 +111,7 @@ create_shadow_tile(_GLFWwindow *window) {
     st.data = malloc(sizeof(st.data[0]) * st.stride * st.stride);
     if (st.data) for (size_t i = 0; i < st.stride * st.stride; i++) st.data[i] = ((uint8_t)(mask[i] * 255)) << 24;
     free(mask);
+    wl_titlebar_tabs_patch_shadow_tile(window);
     return margin;
 }
 
@@ -536,6 +537,7 @@ free_csd_surface(_GLFWWaylandCSDSurface *s) {
 
 static void
 free_csd_surfaces(_GLFWwindow *window) {
+    wl_titlebar_tabs_destroy_corner_patches(window);
 #define Q(which) free_csd_surface(&decs.which)
     all_surfaces(Q);
 #undef Q
@@ -657,6 +659,7 @@ ensure_csd_resources(_GLFWwindow *window) {
     decs.for_window_state.height = window->wl.height;
     decs.for_window_state.focused = is_focused;
     decs.for_window_state.toplevel_states = window->wl.current.toplevel_states;
+    wl_titlebar_tabs_update_corner_patches(window);
     return true;
 }
 

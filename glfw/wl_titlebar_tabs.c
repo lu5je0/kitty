@@ -10,9 +10,12 @@
 
 #include "wl_client_side_decorations.h"
 #include "backend_utils.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/mman.h>
+#include <unistd.h>
 // Needed for the BTN_* defines
 #ifdef __has_include
 #if __has_include(<linux/input.h>)
@@ -25,6 +28,15 @@
 #endif
 
 #define decs window->wl.decorations
+
+// temporary diagnostics for the tear-off (DETACH) investigation
+static bool
+tabs_debug_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) cached = getenv("KITTY_WL_TABS_DEBUG") ? 1 : 0;
+    return cached == 1;
+}
+#define TABS_DEBUG(...) do { if (tabs_debug_enabled()) { fprintf(stderr, "[titlebar-tabs] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
 
 // Logical (unscaled) metrics, must match the macOS implementation
 #define TAB_MAX_WIDTH 200.
@@ -61,6 +73,19 @@
 #define BUTTON_HOVER_STROKE_MULT 1.45
 #define DRAG_THRESHOLD 4.
 #define DETACH_MARGIN 40.
+// window icon drawn at the far left of the bar (Linux only, no macOS analog:
+// there the traffic lights occupy that spot)
+#define ICON_SIZE 16.
+#define ICON_GAP 8.
+// Chrome/Breeze-style drop shadow for tabs windows. Parameters fitted to a
+// measured KDE Breeze shadow profile (gaussian sigma ~21 logical px, shifted
+// ~10 px down, peak alpha ~0.79), scaled down slightly so the tile margin
+// stays a reasonable interactive resize-border size.
+#define SHADOW_MARGIN 32       // logical px, replaces the upstream 12
+#define SHADOW_SIGMA 18.
+#define SHADOW_OFFSET_Y 9.
+#define SHADOW_ALPHA 0.78
+#define SHADOW_EDGE_FADE 6.    // ramp to zero over the outermost px of the tile
 // All animations run for 0.18s with an ease-out curve, same as macOS
 #define ANIM_DURATION ms_to_monotonic_t(180ll)
 #define ANIM_FRAME_INTERVAL ms_to_monotonic_t(16ll)
@@ -140,7 +165,23 @@ typedef struct WaylandTabBarState {
     unsigned long long drag_tab_id;
     int pressed_x, pressed_y;   // scaled px
     int drag_grab_dx;           // scaled px: pointer x - tab x at press
+    int drag_grab_dy;           // scaled px: pointer y - tab y at press
     int ghost_x, drag_cur_y;    // scaled px
+    int drag_index;             // live slot the dragged tab currently occupies
+    int last_drag_x;            // scaled px, for drag direction
+    bool drag_out;              // cursor beyond bar +- DETACH_MARGIN: tear-off zone
+    // translucent tab that follows the cursor outside the bar during a
+    // tear-off drag; a desync child of the *titlebar* surface (which commits
+    // on every drag redraw, applying our set_position)
+    struct {
+        struct wl_surface *surface;
+        struct wl_subsurface *subsurface;
+        struct wp_viewport *viewport;
+        struct wl_buffer *buffer;
+        uint8_t *map;
+        size_t map_size;
+        int w, h;  // scaled px
+    } ghost;
     // layout of the last render, scaled px
     int tab_w, spacing, tab_y, tab_h, tabs_area_right;
     int layout_bar_width;       // bar width the move anims were computed for
@@ -150,10 +191,32 @@ typedef struct WaylandTabBarState {
     int forced_appearance;
     // the titlebar subsurface we last switched to desync mode (see render_bar)
     struct wl_subsurface *desynced_subsurface;
+    // window icon: source pixels (straight RGBA) and a box-downscaled
+    // straight-alpha ARGB cache for the current render size
+    uint8_t *icon_rgba;
+    int icon_w, icon_h;
+    uint32_t *icon_scaled;
+    int icon_scaled_size;
+    // shadow patches behind the four rounded-off window corners. The CSD
+    // shadow subsurfaces all sit outside the window rectangle, so the corner
+    // pixels cut to transparency (GL corner mask at the bottom, CSD
+    // round_top_corners at the top) would otherwise show a bare right-angled
+    // notch with no shadow in it. These sit *below* the parent surface and
+    // carry the shadow tile's interior values, visible only through the cut.
+    struct {
+        struct wl_surface *surface;
+        struct wl_subsurface *subsurface;
+        struct wp_viewport *viewport;
+        struct wl_buffer *buffer[2];  // [0]=focused, [1]=unfocused
+    } corner_patch[4];  // top-left, top-right, bottom-left, bottom-right
+    uint8_t *corner_map;
+    size_t corner_map_size;
+    int corner_px;  // scaled patch size the buffers were built for
     struct WaylandTabBarState *next;
 } WaylandTabBarState;
 
 static WaylandTabBarState *all_states = NULL;
+static void destroy_drag_ghost(WaylandTabBarState *s);
 
 static WaylandTabBarState*
 state_for_window(uintptr_t window_id, bool create) {
@@ -178,6 +241,143 @@ clear_tabs(WaylandTabBarState *s) {
     s->count = 0;
 }
 
+// Corner shadow patches {{{
+
+static void
+destroy_corner_patches(WaylandTabBarState *s) {
+    for (int i = 0; i < 4; i++) {
+        if (s->corner_patch[i].viewport) { wp_viewport_destroy(s->corner_patch[i].viewport); s->corner_patch[i].viewport = NULL; }
+        if (s->corner_patch[i].subsurface) { wl_subsurface_destroy(s->corner_patch[i].subsurface); s->corner_patch[i].subsurface = NULL; }
+        if (s->corner_patch[i].surface) { wl_surface_destroy(s->corner_patch[i].surface); s->corner_patch[i].surface = NULL; }
+        for (int j = 0; j < 2; j++) {
+            if (s->corner_patch[i].buffer[j]) { wl_buffer_destroy(s->corner_patch[i].buffer[j]); s->corner_patch[i].buffer[j] = NULL; }
+        }
+    }
+    if (s->corner_map) { munmap(s->corner_map, s->corner_map_size); s->corner_map = NULL; s->corner_map_size = 0; }
+    s->corner_px = 0;
+}
+
+// The buffers hold the shadow tile's values *inside* the rectangle the tile
+// was blurred for: exactly the shadow a square window would cast at the spot
+// the rounded corner no longer covers.
+static bool
+build_corner_patch_buffers(_GLFWwindow *window, WaylandTabBarState *s, int R) {
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 2; j++) {
+        if (s->corner_patch[i].buffer[j]) { wl_buffer_destroy(s->corner_patch[i].buffer[j]); s->corner_patch[i].buffer[j] = NULL; }
+    }
+    if (s->corner_map) { munmap(s->corner_map, s->corner_map_size); s->corner_map = NULL; s->corner_map_size = 0; }
+    s->corner_px = 0;
+    const size_t one = (size_t)R * R * 4, total = one * 8;
+    const int fd = createAnonymousFile(total);
+    if (fd < 0) return false;
+    s->corner_map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (s->corner_map == MAP_FAILED) { close(fd); s->corner_map = NULL; return false; }
+    s->corner_map_size = total;
+    struct wl_shm_pool *pool = wl_shm_create_pool(_glfw.wl.shm, fd, total);
+    close(fd);
+    if (!pool) { munmap(s->corner_map, total); s->corner_map = NULL; s->corner_map_size = 0; return false; }
+    const uint32_t *tile = decs.shadow_tile.data;
+    const size_t S = decs.shadow_tile.stride, m = decs.shadow_tile.for_decoration_size;
+    size_t off = 0;
+    for (int corner = 0; corner < 4; corner++) {
+        for (int state = 0; state < 2; state++) {
+            uint32_t *dst = (uint32_t*)(s->corner_map + off);
+            for (int y = 0; y < R; y++) {
+                const size_t sy = (corner & 2) ? S - m - R + y : m + y;
+                for (int x = 0; x < R; x++) {
+                    const size_t sx = (corner & 1) ? S - m - R + x : m + x;
+                    uint32_t a = (tile[sy * S + sx] >> 24) & 0xff;
+                    if (state) a /= 2;  // unfocused shadows are lighter, same as render_shadows()
+                    dst[y * R + x] = a << 24;  // premultiplied black
+                }
+            }
+            s->corner_patch[corner].buffer[state] = wl_shm_pool_create_buffer(pool, off, R, R, R * 4, WL_SHM_FORMAT_ARGB8888);
+            off += one;
+        }
+    }
+    wl_shm_pool_destroy(pool);
+    s->corner_px = R;
+    return true;
+}
+
+static void restrict_shadow_input_regions(_GLFWwindow *window);
+
+void
+wl_titlebar_tabs_update_corner_patches(_GLFWwindow *window) {
+    WaylandTabBarState *s = state_for_window(window->id, false);
+    if (!s) return;
+    const bool wanted = s->count > 0 && decs.titlebar.surface && decs.shadow_tile.data
+        && !(window->wl.current.toplevel_states & TOPLEVEL_STATE_DOCKED);
+    if (!wanted) { destroy_corner_patches(s); return; }
+    restrict_shadow_input_regions(window);
+    const double fscale = decs.for_window_state.fscale;
+    const int R = (int)round(WINDOW_TOP_CORNER_RADIUS * fscale);
+    const size_t S = decs.shadow_tile.stride, m = decs.shadow_tile.for_decoration_size;
+    if (R <= 0 || (size_t)R + 2 * m > S) { destroy_corner_patches(s); return; }
+    if (R != s->corner_px && !build_corner_patch_buffers(window, s, R)) return;
+    const bool focused = window->id == _glfw.focusedWindowId;
+    const int lr = (int)WINDOW_TOP_CORNER_RADIUS;
+    const int px[4] = {0, window->wl.width - lr, 0, window->wl.width - lr};
+    const int top_y = -(int)decs.metrics.visible_titlebar_height;
+    const int py[4] = {top_y, top_y, window->wl.height - lr, window->wl.height - lr};
+    for (int i = 0; i < 4; i++) {
+        if (!s->corner_patch[i].surface) {
+            struct wl_surface *surf = wl_compositor_create_surface(_glfw.wl.compositor);
+            if (!surf) continue;
+            wl_surface_set_user_data(surf, window);
+            struct wl_subsurface *sub = wl_subcompositor_get_subsurface(_glfw.wl.subcompositor, surf, window->wl.surface);
+            if (!sub) { wl_surface_destroy(surf); continue; }
+            wl_subsurface_place_below(sub, window->wl.surface);
+            wl_subsurface_set_desync(sub);
+            // never steal pointer input from the surfaces above
+            struct wl_region *empty = wl_compositor_create_region(_glfw.wl.compositor);
+            if (empty) { wl_surface_set_input_region(surf, empty); wl_region_destroy(empty); }
+            if (_glfw.wl.wp_viewporter) s->corner_patch[i].viewport = wp_viewporter_get_viewport(_glfw.wl.wp_viewporter, surf);
+            s->corner_patch[i].surface = surf;
+            s->corner_patch[i].subsurface = sub;
+        }
+        wl_surface_set_buffer_scale(s->corner_patch[i].surface, 1);
+        wl_subsurface_set_position(s->corner_patch[i].subsurface, px[i], py[i]);
+        wl_surface_attach(s->corner_patch[i].surface, s->corner_patch[i].buffer[focused ? 0 : 1], 0, 0);
+        if (s->corner_patch[i].viewport) wp_viewport_set_destination(s->corner_patch[i].viewport, lr, lr);
+        wl_surface_damage(s->corner_patch[i].surface, 0, 0, R, R);
+        wl_surface_commit(s->corner_patch[i].surface);
+    }
+}
+
+void
+wl_titlebar_tabs_destroy_corner_patches(_GLFWwindow *window) {
+    WaylandTabBarState *s = state_for_window(window->id, false);
+    if (s) {
+        destroy_corner_patches(s);
+        destroy_drag_ghost(s);  // its parent (the titlebar surface) is going away
+    }
+}
+
+// The shadow surfaces double as resize handles: with the SHADOW_MARGIN-wide
+// soft shadow the grabbable border would be 32px, so clicks well outside the
+// window would start resizes instead of reaching the window behind (native
+// KDE shadows are not interactive). Restrict input to the innermost 12
+// logical px, the upstream border width.
+static void
+restrict_shadow_input_regions(_GLFWwindow *window) {
+    const int b = 12, w = SHADOW_MARGIN;
+    const int side_h = window->wl.height + (int)decs.metrics.visible_titlebar_height;
+#define SET(which, rx, ry, rw, rh) if (decs.which.surface) { \
+        struct wl_region *reg = wl_compositor_create_region(_glfw.wl.compositor); \
+        if (reg) { wl_region_add(reg, rx, ry, rw, rh); wl_surface_set_input_region(decs.which.surface, reg); wl_region_destroy(reg); wl_surface_commit(decs.which.surface); } }
+    SET(shadow_left, w - b, 0, b, side_h);
+    SET(shadow_right, 0, 0, b, side_h);
+    SET(shadow_top, 0, w - b, window->wl.width, b);
+    SET(shadow_bottom, 0, 0, window->wl.width, b);
+    SET(shadow_upper_left, w - b, w - b, b, b);
+    SET(shadow_upper_right, 0, w - b, b, b);
+    SET(shadow_lower_left, w - b, 0, b, b);
+    SET(shadow_lower_right, 0, 0, b, b);
+#undef SET
+}
+// }}}
+
 void
 wl_titlebar_tabs_free(_GLFWwindow *window) {
     WaylandTabBarState **p = &all_states;
@@ -186,7 +386,11 @@ wl_titlebar_tabs_free(_GLFWwindow *window) {
             WaylandTabBarState *s = *p;
             *p = s->next;
             clear_tabs(s);
+            destroy_corner_patches(s);
+            destroy_drag_ghost(s);
             free(s->tabs);
+            free(s->icon_rgba);
+            free(s->icon_scaled);
             free(s);
             return;
         }
@@ -194,10 +398,37 @@ wl_titlebar_tabs_free(_GLFWwindow *window) {
     }
 }
 
+void
+wl_titlebar_tabs_set_window_icon(_GLFWwindow *window, int width, int height, const unsigned char *rgba) {
+    if (width <= 0 || height <= 0 || !rgba) return;
+    WaylandTabBarState *s = state_for_window(window->id, true);
+    if (!s) return;
+    const size_t sz = (size_t)width * height * 4;
+    uint8_t *copy = malloc(sz);
+    if (!copy) return;
+    memcpy(copy, rgba, sz);
+    free(s->icon_rgba);
+    s->icon_rgba = copy; s->icon_w = width; s->icon_h = height;
+    free(s->icon_scaled); s->icon_scaled = NULL; s->icon_scaled_size = 0;
+    if (s->count) decs.titlebar_needs_update = true;
+}
+
 bool
 wl_titlebar_tabs_active(_GLFWwindow *window) {
     WaylandTabBarState *s = state_for_window(window->id, false);
     return s && s->count > 0;
+}
+
+// True while a titlebar tab drag holds the pointer. Crossing between the
+// client's own surfaces makes pointerHandleLeave zero
+// _glfw.wl.pointer_button_count even though the button is still held and the
+// press serial is still a valid implicit grab; _glfwPlatformStartDrag uses
+// this to relax its early EPERM check in that situation.
+bool
+wl_titlebar_tabs_any_drag_active(void) {
+    for (WaylandTabBarState *s = all_states; s; s = s->next)
+        if (s->dragging && s->pressed_on == PRESS_TAB) return true;
+    return false;
 }
 
 // Drawing helpers {{{
@@ -456,9 +687,7 @@ draw_cached_text(_GLFWwindow *window, Canvas *tab, WaylandTabEntry *t, uint32_t 
 // }}}
 
 static void
-render_one_tab(_GLFWwindow *window, WaylandTabEntry *t, Canvas *bar, double fscale, int draw_x) {
-    const double alpha = anim_current(&t->fade);
-    if (alpha <= 0 || t->w <= 0 || t->h <= 0) return;
+render_tab_canvas(_GLFWwindow *window, WaylandTabEntry *t, Canvas *tab, double fscale) {
     uint32_t bg = t->bg, fg = t->fg;
     if (anim_is_running(&t->color)) {
         const double ct = anim_current(&t->color);
@@ -472,30 +701,112 @@ render_one_tab(_GLFWwindow *window, WaylandTabEntry *t, Canvas *bar, double fsca
     }
     if (t->needs_attention && !t->is_active) fg = ATTENTION_COLOR;
 
-    Canvas tab = {.width = t->w, .height = t->h};
-    tab.px = malloc((size_t)tab.width * tab.height * sizeof(uint32_t));
-    if (!tab.px) return;
     const uint32_t bg_argb = 0xff000000u | bg;
-    for (size_t i = 0; i < (size_t)tab.width * tab.height; i++) tab.px[i] = bg_argb;
+    for (size_t i = 0; i < (size_t)tab->width * tab->height; i++) tab->px[i] = bg_argb;
 
     // title text, centered, in the box (8, *, w - 8 - 22, full height)
-    ensure_text_mask(window, t, t->h, fscale);
-    draw_cached_text(window, &tab, t, fg, fscale);
+    ensure_text_mask(window, t, tab->height, fscale);
+    draw_cached_text(window, tab, t, fg, fscale);
 
     // close button: rect is (w-20, (h-14)/2, 14, 14) in logical units
-    const double close_x = t->w - CLOSE_RECT_RIGHT_OFFSET * fscale, close_size = CLOSE_RECT_SIZE * fscale;
-    const double close_y = (t->h - close_size) / 2;
+    const double close_x = tab->width - CLOSE_RECT_RIGHT_OFFSET * fscale, close_size = CLOSE_RECT_SIZE * fscale;
+    const double close_y = (tab->height - close_size) / 2;
     if (t->close_hovered) {
-        canvas_blend_circle(&tab, close_x + close_size / 2, close_y + close_size / 2, close_size / 2, fg, 0.25);
+        canvas_blend_circle(tab, close_x + close_size / 2, close_y + close_size / 2, close_size / 2, fg, 0.25);
     }
     const double inset = CLOSE_CROSS_INSET * fscale, half_w = STROKE_WIDTH * fscale / 2;
     const double calpha = t->close_hovered ? 1.0 : 0.6;
-    canvas_blend_segment(&tab, close_x + inset, close_y + inset, close_x + close_size - inset, close_y + close_size - inset, half_w, fg, calpha);
-    canvas_blend_segment(&tab, close_x + inset, close_y + close_size - inset, close_x + close_size - inset, close_y + inset, half_w, fg, calpha);
+    canvas_blend_segment(tab, close_x + inset, close_y + inset, close_x + close_size - inset, close_y + close_size - inset, half_w, fg, calpha);
+    canvas_blend_segment(tab, close_x + inset, close_y + close_size - inset, close_x + close_size - inset, close_y + inset, half_w, fg, calpha);
+}
 
+static void
+render_one_tab(_GLFWwindow *window, WaylandTabEntry *t, Canvas *bar, double fscale, int draw_x) {
+    const double alpha = anim_current(&t->fade);
+    if (alpha <= 0 || t->w <= 0 || t->h <= 0) return;
+    Canvas tab = {.width = t->w, .height = t->h};
+    tab.px = malloc((size_t)tab.width * tab.height * sizeof(uint32_t));
+    if (!tab.px) return;
+    render_tab_canvas(window, t, &tab, fscale);
     canvas_composite_rounded(bar, &tab, draw_x, t->y, TAB_CORNER_RADIUS * fscale, alpha);
     free(tab.px);
 }
+
+// Tear-off drag ghost {{{
+
+#define GHOST_ALPHA 0.85
+
+static void
+destroy_drag_ghost(WaylandTabBarState *s) {
+    if (s->ghost.viewport) { wp_viewport_destroy(s->ghost.viewport); s->ghost.viewport = NULL; }
+    if (s->ghost.subsurface) { wl_subsurface_destroy(s->ghost.subsurface); s->ghost.subsurface = NULL; }
+    if (s->ghost.surface) { wl_surface_destroy(s->ghost.surface); s->ghost.surface = NULL; }
+    if (s->ghost.buffer) { wl_buffer_destroy(s->ghost.buffer); s->ghost.buffer = NULL; }
+    if (s->ghost.map) { munmap(s->ghost.map, s->ghost.map_size); s->ghost.map = NULL; s->ghost.map_size = 0; }
+    s->ghost.w = s->ghost.h = 0;
+}
+
+// Translucent snapshot of the dragged tab, following the cursor outside the
+// bar so a tear-off shows where the tab is going (mirrors the macOS ghost).
+static bool
+show_drag_ghost(_GLFWwindow *window, WaylandTabBarState *s, WaylandTabEntry *t, double fscale) {
+    const int w = s->tab_w, h = s->tab_h;
+    if (w <= 0 || h <= 0 || !decs.titlebar.surface) return false;
+    if (s->ghost.surface && (s->ghost.w != w || s->ghost.h != h)) destroy_drag_ghost(s);
+    if (s->ghost.surface) return true;
+    const size_t total = (size_t)w * h * 4;
+    const int fd = createAnonymousFile(total);
+    if (fd < 0) return false;
+    s->ghost.map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (s->ghost.map == MAP_FAILED) { close(fd); s->ghost.map = NULL; return false; }
+    s->ghost.map_size = total;
+    struct wl_shm_pool *pool = wl_shm_create_pool(_glfw.wl.shm, fd, total);
+    close(fd);
+    if (!pool) { destroy_drag_ghost(s); return false; }
+    s->ghost.buffer = wl_shm_pool_create_buffer(pool, 0, w, h, w * 4, WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    if (!s->ghost.buffer) { destroy_drag_ghost(s); return false; }
+
+    Canvas tab = {.px = malloc(total), .width = w, .height = h};
+    if (!tab.px) { destroy_drag_ghost(s); return false; }
+    render_tab_canvas(window, t, &tab, fscale);
+    const double r = TAB_CORNER_RADIUS * fscale;
+    uint32_t *dst = (uint32_t*)s->ghost.map;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const double a = rounded_rect_coverage(x, y, 0, 0, w, h, r) * GHOST_ALPHA;
+            const uint32_t c = tab.px[(size_t)y * w + x];
+            dst[(size_t)y * w + x] =  // premultiplied
+                ((uint32_t)(a * 255 + 0.5) << 24)
+                | ((uint32_t)(((c >> 16) & 0xff) * a + 0.5) << 16)
+                | ((uint32_t)(((c >> 8) & 0xff) * a + 0.5) << 8)
+                | (uint32_t)((c & 0xff) * a + 0.5);
+        }
+    }
+    free(tab.px);
+
+    struct wl_surface *surf = wl_compositor_create_surface(_glfw.wl.compositor);
+    if (!surf) { destroy_drag_ghost(s); return false; }
+    wl_surface_set_user_data(surf, window);
+    struct wl_subsurface *sub = wl_subcompositor_get_subsurface(_glfw.wl.subcompositor, surf, decs.titlebar.surface);
+    if (!sub) { wl_surface_destroy(surf); destroy_drag_ghost(s); return false; }
+    s->ghost.surface = surf; s->ghost.subsurface = sub;
+    wl_subsurface_set_desync(sub);
+    // never steal pointer focus: the ghost rides under the cursor
+    struct wl_region *empty = wl_compositor_create_region(_glfw.wl.compositor);
+    if (empty) { wl_surface_set_input_region(surf, empty); wl_region_destroy(empty); }
+    if (_glfw.wl.wp_viewporter) {
+        s->ghost.viewport = wp_viewporter_get_viewport(_glfw.wl.wp_viewporter, surf);
+        if (s->ghost.viewport) wp_viewport_set_destination(s->ghost.viewport, (int)round(w / fscale), (int)round(h / fscale));
+    }
+    wl_surface_set_buffer_scale(surf, 1);
+    wl_surface_attach(surf, s->ghost.buffer, 0, 0);
+    wl_surface_damage(surf, 0, 0, w, h);
+    wl_surface_commit(surf);
+    s->ghost.w = w; s->ghost.h = h;
+    return true;
+}
+// }}}
 
 static void
 render_plus_button(WaylandTabBarState *s, Canvas *bar, uint32_t bar_bg, double fscale) {
@@ -587,6 +898,138 @@ render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas
     s->tabs_area_right = right - (int)round(TAB_SPACING * fscale);
 }
 
+// Replaces the freshly built shadow tile of a tabs window with a
+// Chrome/Breeze-style drop shadow: a real gaussian blur of the window's
+// rounded rectangle, shifted downwards, with parameters fitted to a measured
+// KDE Breeze shadow. The upstream tile (a tight 12px 0.7-alpha box blur with
+// square corners and no offset) reads as a dark outline next to native KDE
+// windows. Hooked from create_shadow_tile(); the tile layout (stride,
+// corner_size, repeating middle segments) is unchanged so the upstream
+// slicing in render_shadows() and the corner patches keep working.
+void
+wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window) || !decs.shadow_tile.data) return;
+    double fscale = decs.for_window_state.fscale;
+    if (fscale <= 0) fscale = 1.;
+    const ssize_t S = (ssize_t)decs.shadow_tile.stride;
+    const ssize_t m = (ssize_t)decs.shadow_tile.for_decoration_size;
+    const double sigma = SHADOW_SIGMA * fscale;
+    const ssize_t radius = (ssize_t)ceil(2.5 * sigma);
+    float *bufs = malloc(sizeof(float) * (size_t)(2 * S * S + 2 * radius + 1));
+    if (!bufs) return;
+    float *mask = bufs, *scratch = bufs + S * S, *kernel = bufs + 2 * (size_t)S * S;
+    double ksum = 0;
+    for (ssize_t i = -radius; i <= radius; i++) {
+        const double v = exp(-(double)(i * i) / (2 * sigma * sigma));
+        kernel[i + radius] = (float)v; ksum += v;
+    }
+    for (ssize_t i = 0; i <= 2 * radius; i++) kernel[i] = (float)(kernel[i] / ksum);
+    // base: the window's rounded rect, shifted down by the shadow offset
+    const double r = WINDOW_TOP_CORNER_RADIUS * fscale;
+    const double off = SHADOW_OFFSET_Y * fscale;
+    const double rect_size = (double)(S - 2 * m);
+    for (ssize_t y = 0; y < S; y++)
+        for (ssize_t x = 0; x < S; x++)
+            mask[y * S + x] = (float)rounded_rect_coverage((int)x, (int)y, (double)m, m + off, rect_size, rect_size, r);
+    // separable gaussian: horizontal into scratch, vertical back into mask
+    for (ssize_t y = 0; y < S; y++) {
+        const float *src = mask + y * S;
+        float *dst = scratch + y * S;
+        for (ssize_t x = 0; x < S; x++) {
+            double a = 0;
+            const ssize_t k0 = x - radius < 0 ? radius - x : 0, k1 = x + radius >= S ? S - 1 - x + radius : 2 * radius;
+            for (ssize_t k = k0; k <= k1; k++) a += src[x + k - radius] * kernel[k];
+            dst[x] = (float)a;
+        }
+    }
+    for (ssize_t x = 0; x < S; x++) {
+        for (ssize_t y = 0; y < S; y++) {
+            double a = 0;
+            const ssize_t k0 = y - radius < 0 ? radius - y : 0, k1 = y + radius >= S ? S - 1 - y + radius : 2 * radius;
+            for (ssize_t k = k0; k <= k1; k++) a += scratch[(y + k - radius) * S + x] * kernel[k];
+            mask[y * S + x] = (float)a;
+        }
+    }
+    // fade to zero at the tile boundary so the truncation is not a hard line
+    const double fade = SHADOW_EDGE_FADE * fscale;
+    for (ssize_t y = 0; y < S; y++) {
+        for (ssize_t x = 0; x < S; x++) {
+            ssize_t d = x; if (y < d) d = y; if (S - 1 - x < d) d = S - 1 - x; if (S - 1 - y < d) d = S - 1 - y;
+            double f = fade > 0 ? d / fade : 1;
+            if (f > 1) f = 1;
+            const double a = mask[y * S + x] * SHADOW_ALPHA * f;
+            decs.shadow_tile.data[y * S + x] = ((uint32_t)(a * 255 + 0.5)) << 24;
+        }
+    }
+    free(bufs);
+}
+
+static int
+tabs_left_margin(WaylandTabBarState *s, double fscale) {
+    double m = TAB_BAR_LEFT_MARGIN;
+    if (s->icon_rgba) m += ICON_SIZE + ICON_GAP;
+    return (int)round(m * fscale);
+}
+
+// box-filter downscale of the straight-alpha RGBA icon to dst x dst px,
+// weighting colour by alpha to avoid dark fringes on transparent edges
+static void
+ensure_scaled_icon(WaylandTabBarState *s, int dst) {
+    if (!s->icon_rgba || dst <= 0 || (s->icon_scaled && s->icon_scaled_size == dst)) return;
+    free(s->icon_scaled);
+    s->icon_scaled = malloc((size_t)dst * dst * sizeof(uint32_t));
+    if (!s->icon_scaled) { s->icon_scaled_size = 0; return; }
+    s->icon_scaled_size = dst;
+    const int sw = s->icon_w, sh = s->icon_h;
+    for (int y = 0; y < dst; y++) {
+        const double sy0 = (double)y * sh / dst, sy1 = (double)(y + 1) * sh / dst;
+        for (int x = 0; x < dst; x++) {
+            const double sx0 = (double)x * sw / dst, sx1 = (double)(x + 1) * sw / dst;
+            double r = 0, g = 0, b = 0, a = 0, area = 0;
+            for (int yy = (int)sy0; yy < (int)ceil(sy1) && yy < sh; yy++) {
+                const double hgt = MIN(sy1, yy + 1.) - MAX(sy0, (double)yy);
+                for (int xx = (int)sx0; xx < (int)ceil(sx1) && xx < sw; xx++) {
+                    const double wdt = MIN(sx1, xx + 1.) - MAX(sx0, (double)xx);
+                    const double wt = hgt * wdt;
+                    const uint8_t *p = s->icon_rgba + 4 * ((size_t)yy * sw + xx);
+                    const double pa = p[3] / 255. * wt;
+                    r += p[0] * pa; g += p[1] * pa; b += p[2] * pa; a += pa;
+                    area += wt;
+                }
+            }
+            uint32_t out = 0;
+            if (area > 0 && a > 0) {
+                out = ((uint32_t)(a / area * 255 + 0.5) << 24)
+                    | ((uint32_t)MIN(255., r / a + 0.5) << 16)
+                    | ((uint32_t)MIN(255., g / a + 0.5) << 8)
+                    | (uint32_t)MIN(255., b / a + 0.5);
+            }
+            s->icon_scaled[(size_t)y * dst + x] = out;  // straight-alpha ARGB
+        }
+    }
+}
+
+static void
+render_bar_icon(WaylandTabBarState *s, Canvas *bar, double fscale) {
+    if (!s->icon_rgba) return;
+    const int dst = (int)round(ICON_SIZE * fscale);
+    ensure_scaled_icon(s, dst);
+    if (!s->icon_scaled || s->icon_scaled_size != dst) return;
+    const int x0 = (int)round(TAB_BAR_LEFT_MARGIN * fscale);
+    const int y0 = (bar->height - dst) / 2;
+    for (int y = 0; y < dst; y++) {
+        const int by = y0 + y;
+        if (by < 0 || by >= bar->height) continue;
+        for (int x = 0; x < dst; x++) {
+            const int bx = x0 + x;
+            if (bx < 0 || bx >= bar->width) continue;
+            const uint32_t p = s->icon_scaled[(size_t)y * dst + x];
+            uint32_t *d = bar->px + (size_t)by * bar->width + bx;
+            *d = blend_argb(*d, p, (p >> 24) / 255.);
+        }
+    }
+}
+
 void
 wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_bg, uint32_t fg, uint32_t hover_bg UNUSED, bool is_dark) {
     WaylandTabBarState *s = state_for_window(window->id, false);
@@ -622,10 +1065,11 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
 
     // window buttons first: they define how much room tabs have
     render_compact_window_buttons(window, s, &bar, fg, fscale);
+    render_bar_icon(s, &bar, fscale);
 
     // layout, all in scaled pixels; dying tabs keep their frozen geometry and
     // do not take part in it
-    const int left_margin = (int)round(TAB_BAR_LEFT_MARGIN * fscale);
+    const int left_margin = tabs_left_margin(s, fscale);
     const int tab_h = (int)round(TAB_HEIGHT * fscale), spacing = (int)round(TAB_SPACING * fscale);
     const int plus_w = (int)round(PLUS_BUTTON_WIDTH * fscale);
     int n = 0;
@@ -670,7 +1114,8 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     s->plus.x = (int)round(anim_current(&s->plus_move));
     s->plus.y = tab_y; s->plus.w = plus_w; s->plus.h = tab_h;
     render_plus_button(s, &bar, bar_bg & 0xffffff, fscale);
-    if (dragged) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);  // ghost on top
+    // in-bar ghost on top; hidden while torn off (the subsurface ghost shows)
+    if (dragged && !s->drag_out) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);
     round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
     s->layout_bar_width = bar.width;
     s->layout_fscale = fscale;
@@ -763,6 +1208,57 @@ in_plus(WaylandTabBarState *s, int sx, int sy) {
     return sx >= s->plus.x && sx < s->plus.x + s->plus.w && sy >= s->plus.y && sy < s->plus.y + s->plus.h;
 }
 
+static int
+live_index_of(WaylandTabBarState *s, unsigned long long tab_id) {
+    int idx = 0;
+    for (size_t i = 0; i < s->count; i++) {
+        WaylandTabEntry *t = s->tabs + i;
+        if (t->dying) continue;
+        if (t->tab_id == tab_id) return idx;
+        idx++;
+    }
+    return 0;
+}
+
+// macOS dropIndexForPoint: like Chrome, swap once the ghost covers more than
+// half of the neighboring tab. Slot midpoints are computed from the layout
+// targets (the gap for the dragged tab included), matching NSView frames.
+static int
+live_drop_index(WaylandTabBarState *s, int ghost_left, bool moving_right, double fscale) {
+    const int step = s->tab_w + s->spacing;
+    const int ghost_right = ghost_left + s->tab_w;
+    const int left_margin = tabs_left_margin(s, fscale);
+    int idx = 0, slot = 0;
+    for (size_t i = 0; i < s->count; i++) {
+        WaylandTabEntry *t = s->tabs + i;
+        if (t->dying) continue;
+        const int mid = left_margin + slot * step + s->tab_w / 2;
+        slot++;
+        if (t->tab_id == s->drag_tab_id) continue;
+        if (moving_right ? ghost_right > mid : mid < ghost_left) idx++;
+    }
+    return idx;
+}
+
+// move the dragged tab to live slot idx. Live entries always form the array
+// prefix (the diff in glfwWaylandSetTitlebarTabs appends dying ones), so this
+// is a plain rotate within that prefix.
+static void
+reorder_dragged(WaylandTabBarState *s, int idx) {
+    size_t from = 0, live = 0;
+    bool found = false;
+    for (size_t i = 0; i < s->count && !s->tabs[i].dying; i++, live++)
+        if (s->tabs[i].tab_id == s->drag_tab_id) { from = i; found = true; }
+    if (!found || !live) return;
+    size_t to = (size_t)(idx < 0 ? 0 : idx);
+    if (to >= live) to = live - 1;
+    if (to == from) return;
+    WaylandTabEntry tmp = s->tabs[from];
+    if (from < to) memmove(s->tabs + from, s->tabs + from + 1, (to - from) * sizeof(tmp));
+    else memmove(s->tabs + to + 1, s->tabs + to, (from - to) * sizeof(tmp));
+    s->tabs[to] = tmp;
+}
+
 bool
 wl_titlebar_tabs_handle_motion(_GLFWwindow *window, double x, double y) {
     WaylandTabBarState *s = state_for_window(window->id, false);
@@ -773,6 +1269,9 @@ wl_titlebar_tabs_handle_motion(_GLFWwindow *window, double x, double y) {
         if (!s->dragging && (abs(sx - s->pressed_x) >= DRAG_THRESHOLD * fscale || abs(sy - s->pressed_y) >= DRAG_THRESHOLD * fscale)) {
             s->dragging = true;
             s->drag_tab_id = s->pressed_tab_id;
+            s->drag_index = live_index_of(s, s->drag_tab_id);
+            s->last_drag_x = s->pressed_x;
+            TABS_DEBUG("drag start tab=%llu", s->drag_tab_id);
             // macOS behaviour: activate the tab as soon as the drag starts
             if (_glfw.callbacks.titlebar_tab_action)
                 _glfw.callbacks.titlebar_tab_action((GLFWwindow*)window, GLFW_TITLEBAR_TAB_ACTIVATE, s->drag_tab_id, 0);
@@ -782,7 +1281,40 @@ wl_titlebar_tabs_handle_motion(_GLFWwindow *window, double x, double y) {
             const int max_x = (int)decs.titlebar.buffer.width - s->tab_w;
             if (gx < 0) gx = 0;
             if (gx > max_x) gx = max_x;
+            // live reorder, same as macOS: once the ghost covers more than
+            // half of a neighboring tab the tabs swap (animated)
+            const bool moving_right = sx >= s->last_drag_x;
+            s->last_drag_x = sx;
+            const int idx = live_drop_index(s, gx, moving_right, fscale);
+            if (idx != s->drag_index) {
+                reorder_dragged(s, idx);
+                s->drag_index = idx;
+            }
             s->ghost_x = gx; s->drag_cur_y = sy;
+            const bool out = sy < -(int)(DETACH_MARGIN * fscale)
+                || sy > (int)decs.titlebar.buffer.height + (int)(DETACH_MARGIN * fscale);
+            if (out != s->drag_out) {
+                s->drag_out = out;
+                if (!out) destroy_drag_ghost(s);
+                else if (_glfw.callbacks.titlebar_tab_action) {
+                    // ask kitty to start a real DND session so the tab can be
+                    // dropped onto other kitty windows (upstream mime drag).
+                    // Until the compositor takes the pointer (see
+                    // handle_leave) the in-client ghost below keeps tracking.
+                    TABS_DEBUG("drag out: requesting DND handoff for tab=%llu", s->drag_tab_id);
+                    _glfw.callbacks.titlebar_tab_action((GLFWwindow*)window, GLFW_TITLEBAR_TAB_DRAG_OUT, s->drag_tab_id, 0);
+                }
+            }
+            if (out) {
+                WaylandTabEntry *d = entry_for_id(s, s->drag_tab_id);
+                if (d && show_drag_ghost(window, s, d, fscale)) {
+                    // logical coords relative to the titlebar surface; applied
+                    // by the titlebar commit of the redraw below
+                    wl_subsurface_set_position(s->ghost.subsurface,
+                        (int)round((sx - s->drag_grab_dx) / fscale), (int)round((sy - s->drag_grab_dy) / fscale));
+                }
+            }
+            TABS_DEBUG("drag motion sx=%d sy=%d bar_h=%d out=%d", sx, sy, (int)decs.titlebar.buffer.height, (int)out);
             decs.titlebar_needs_update = true;
             return true;
         }
@@ -828,8 +1360,20 @@ wl_titlebar_tabs_handle_leave(_GLFWwindow *window) {
         changed = true;
     }
     s->plus.hovered = false;
-    s->pressed_on = PRESS_NONE;
-    if (s->dragging) { s->dragging = false; changed = true; }
+    if (s->dragging && s->pressed_on == PRESS_TAB && !_glfw.wl.drag.source) {
+        // kwin re-picks the focused surface among the client's own surfaces
+        // even while a button is held: dragging a tab off the titlebar sends
+        // leave + enter(main surface). Keep the drag alive; the events are
+        // forwarded by wl_titlebar_tabs_forward_grabbed_pointer().
+        TABS_DEBUG("leave during drag: keeping the drag alive");
+    } else {
+        // either a normal leave or the DND session (_glfw.wl.drag.source)
+        // took the pointer over: the tab now travels as a drag payload
+        s->pressed_on = PRESS_NONE;
+        if (s->dragging) { TABS_DEBUG("leave cancels drag (dnd=%d)", _glfw.wl.drag.source != NULL); s->dragging = false; changed = true; }
+        s->drag_out = false;
+        destroy_drag_ghost(s);
+    }
     if (changed) decs.titlebar_needs_update = true;
     return changed;
 }
@@ -852,28 +1396,31 @@ wl_titlebar_tabs_handle_button(_GLFWwindow *window, uint32_t button, uint32_t st
             s->pressed_tab_id = t->tab_id;
             s->pressed_x = sx; s->pressed_y = sy;
             s->drag_grab_dx = sx - t->x;
+            s->drag_grab_dy = sy - t->y;
         }
         s->dragging = false;
+        s->drag_out = false;
+        destroy_drag_ghost(s);
         return true;
     }
     // release
     if (s->dragging && button == s->pressed_button) {
         const bool detach = s->drag_cur_y < -(int)(DETACH_MARGIN * fscale)
             || s->drag_cur_y > (int)decs.titlebar.buffer.height + (int)(DETACH_MARGIN * fscale);
-        int idx = 0;
+        TABS_DEBUG("release: drag_cur_y=%d bar_h=%d detach=%d", s->drag_cur_y, (int)decs.titlebar.buffer.height, (int)detach);
+        // the drop index was maintained during the drag by the live reorder
+        int idx = s->drag_index;
         size_t live = 0;
         for (size_t i = 0; i < s->count; i++) if (!s->tabs[i].dying) live++;
-        if (live > 1 && s->tab_w + s->spacing > 0) {
-            const int ghost_centre = s->ghost_x + s->tab_w / 2;
-            idx = (ghost_centre - (int)round(TAB_BAR_LEFT_MARGIN * fscale)) / (s->tab_w + s->spacing);
-            if (idx < 0) idx = 0;
-            if (idx > (int)live - 1) idx = (int)live - 1;
-        }
+        if (idx < 0) idx = 0;
+        if (live && idx > (int)live - 1) idx = (int)live - 1;
         const unsigned long long tab_id = s->drag_tab_id;
         // let the dragged tab animate from where it was dropped to its slot
         WaylandTabEntry *d = entry_for_id(s, tab_id);
         if (d) { set_anim(&d->move_x, s->ghost_x); d->x = s->ghost_x; }
         s->dragging = false; s->pressed_on = PRESS_NONE;
+        s->drag_out = false;
+        destroy_drag_ghost(s);
         decs.titlebar_needs_update = true;
         if (_glfw.callbacks.titlebar_tab_action) {
             if (detach) _glfw.callbacks.titlebar_tab_action((GLFWwindow*)window, GLFW_TITLEBAR_TAB_DETACH, tab_id, 0);
@@ -901,6 +1448,47 @@ wl_titlebar_tabs_handle_button(_GLFWwindow *window, uint32_t button, uint32_t st
             break;
     }
     return true;
+}
+
+// kwin re-picks the pointer-focused surface among a client's own surfaces
+// even while a button is held down, so dragging a tab off the titlebar gets a
+// leave + enter(main surface) pair and the remaining motion/button events are
+// delivered relative to the newly focused surface. This forwards them to the
+// drag with coordinates translated into titlebar space, so the ghost keeps
+// following and the release still produces DROP/DETACH. Returns true when the
+// event was consumed. Hooked at the top of pointerHandleMotion/Button.
+bool
+wl_titlebar_tabs_forward_grabbed_pointer(_GLFWwindow *window, int button, uint32_t state) {
+    WaylandTabBarState *s = state_for_window(window->id, false);
+    if (!s || !s->dragging || s->pressed_on != PRESS_TAB) return false;
+    if (decs.focus == CSD_titlebar) return false;  // the regular CSD path handles these
+    const double W = decs.metrics.width, vth = decs.metrics.visible_titlebar_height;
+    double dx, dy;
+    switch (decs.focus) {
+        case CENTRAL_WINDOW: dx = 0; dy = vth; break;
+        case CSD_shadow_top: dx = 0; dy = -W; break;
+        case CSD_shadow_bottom: dx = 0; dy = window->wl.height + vth; break;
+        case CSD_shadow_left: dx = -W; dy = 0; break;
+        case CSD_shadow_right: dx = window->wl.width; dy = 0; break;
+        case CSD_shadow_upper_left: dx = -W; dy = -W; break;
+        case CSD_shadow_upper_right: dx = window->wl.width; dy = -W; break;
+        case CSD_shadow_lower_left: dx = -W; dy = window->wl.height + vth; break;
+        case CSD_shadow_lower_right: dx = window->wl.width; dy = window->wl.height + vth; break;
+        default: return false;
+    }
+    const double tx = window->wl.allCursorPosX + dx, ty = window->wl.allCursorPosY + dy;
+    decs.titlebar_needs_update = false;
+    bool consumed;
+    if (button < 0) consumed = wl_titlebar_tabs_handle_motion(window, tx, ty);
+    else consumed = wl_titlebar_tabs_handle_button(window, (uint32_t)button, state, tx, ty);
+    TABS_DEBUG("forwarded grabbed %s focus=%d -> (%.0f,%.0f) consumed=%d",
+               button < 0 ? "motion" : "button", (int)decs.focus, tx, ty, (int)consumed);
+    if (decs.titlebar_needs_update) {
+        decs.titlebar_needs_update = false;
+        csd_change_title(window);
+        if (!window->wl.waiting_for_swap_to_commit) wl_surface_commit(window->wl.surface);
+    }
+    return consumed;
 }
 // }}}
 
@@ -1016,6 +1604,10 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // geometry calculations, so just updating them and forcing a rebuild is
     // enough.
     if (s->count > 0 && decs.metrics.visible_titlebar_height != TABS_TITLEBAR_HEIGHT) {
+        // wider shadow margin for the Chrome/Breeze-style drop shadow (the
+        // interactive resize border stays 12px, see restrict_shadow_input_regions)
+        decs.metrics.width = SHADOW_MARGIN;
+        decs.metrics.horizontal = 2 * decs.metrics.width;
         decs.metrics.top = decs.metrics.width + TABS_TITLEBAR_HEIGHT;
         decs.metrics.visible_titlebar_height = TABS_TITLEBAR_HEIGHT;
         decs.metrics.vertical = decs.metrics.width + decs.metrics.top;
@@ -1027,4 +1619,7 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // still server side, which they are until the forced CSD switch above.
     if (csd_set_titlebar_color(window, bar_color, use_system_color) && !window->wl.waiting_for_swap_to_commit)
         wl_surface_commit(window->wl.surface);
+    // cover the rounded-off corners with shadow continuations (also runs from
+    // ensure_csd_resources on resize/scale/focus changes)
+    wl_titlebar_tabs_update_corner_patches(window);
 }

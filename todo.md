@@ -9,11 +9,21 @@
 
 **当前状态（2026-08-05，最新提交已推送 origin）**：Stage 1-3 全部完成并验证 ——
 静态渲染 + 命中/点击语义（Stage 2）、5 种 0.18s ease-out 动画（真机中间帧 + `.wl-test/anim_harness.c`
-离屏 18 项断言，含 1.25x/2x 分数缩放）、配色逐像素对齐 macos.png（bar #393A39 / active tab #626366，`forced_appearance`
+离屏 21 项断言，含 1.25x/2x 分数缩放）、配色逐像素对齐 macos.png（bar #393A39 / active tab #626366，`forced_appearance`
 尊重 `macos_titlebar_color dark`）、四角圆角（顶角 CSD、底角 GL corner mask）、标题省略号截断、
 拖拽闪动修复（常驻 desync）、紧凑窗口按钮（无圆底细线风格，chevron 臂 5.0 / × 臂 4.5）。
-剩余：hover/拖拽滑入人工确认、跨窗口拖拽（Stage 4，上游 mime 方案）、mutter/sway 实测、分数缩放真机观感。
-ghost 拖出栏外跟随 Y 已确认**不做**（见"已知会退化的点"）。
+本日新增（真机验证状态见括号）：
+- **拖动实时重排**（✓ 逻辑 harness 断言；手感已可玩）：ghost 过邻居中线即让位，macOS dropIndexForPoint 同款
+- **标题栏最左 kitty icon**（✓ kwin 截图）：16 逻辑 px，box 降采样，经 `_glfwPlatformSetWindowIcon` 钩子缓存
+- **Chrome/Breeze 风格阴影**（✓ 轮廓逐像素对齐 Breeze）+ **圆角阴影缺口修复**（✓ 四角截图）——见"已知会退化的点"下两条
+- **拖出成独立窗口（DETACH）修复**（✓ 用户真机确认）：kwin 在同客户端 surface 间也会重选指针焦点，
+  靠 `wl_titlebar_tabs_forward_grabbed_pointer()`（wl_init.c 2 行钩子）跨 surface 续接拖拽事件
+- **拖出时半透明 ghost tab**（✓ 用户确认可见）：detach 区内显示，挂在 titlebar surface 的 desync 子表面
+- **跨窗口合并（Stage 4，DND 方案）**（⚠ 待用户复测）：拖出 ±40px 发 `GLFW_TITLEBAR_TAB_DRAG_OUT` →
+  boss.titlebar_tab_drag_out → 复用上游 `start_tab_drag` mime DND；修复了 `_glfwPlatformStartDrag`
+  的 EPERM 误判（同客户端 leave 清零 pointer_button_count，用 `wl_titlebar_tabs_any_drag_active()` 放宽）
+剩余：跨窗口合并复测、mutter/sway 实测、分数缩放真机观感、临时调试日志（`KITTY_WL_TABS_DEBUG=1`）后续可删。
+ghost 拖出栏外跟随 Y 通过 DND 缩略图实现（此前"不做"的独立 subsurface 方案已被 DND 替代）。
 
 ---
 
@@ -240,6 +250,7 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
   DROP index、重排滑入中间帧与收敛、垂死 tab 淡出与 reap、timer 自动停；
   另有 1.25x/2x 分数缩放套件（像素扫描定位 tab run，逻辑坐标驱动命中/hover/DROP）。
   编译：`gcc -D_GLFW_WAYLAND -DHAS_MEMFD_CREATE -I../glfw -I.. anim_harness.c ../glfw/wl_titlebar_tabs.c
+  ../glfw/wayland-viewporter-client-protocol.c
   $(pkg-config --cflags dbus-1 xkbcommon) $(pkg-config --cflags --libs wayland-client) -lm`
 
 ### Stage 4：拖拽与撕下
@@ -265,9 +276,34 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 
 ## 已知会退化的点（记录，不必修）
 
-- **拖拽 ghost 锁在标题栏内**（macOS 上超出栏 ±40px 后 ghost 跟随光标画到栏外）：
-  需要独立 subsurface，无法自动化测试且协议错误会杀掉整个连接。
-  用户已确认**接受，不做**（2026-08-05）。拖出 ±40px 松手撕下（DETACH）功能本身正常
+- **阴影观感与 KDE 原生不符 —— ✅ 已重做（2026-08-05，实测 Breeze 轮廓逐像素对齐）**：
+  上游 CSD 阴影是 12px、0.7 alpha、无偏移、直角底的紧描边。现 tabs 窗口改为 Chrome/Breeze
+  风格：`wl_titlebar_tabs_patch_shadow_tile()`（wl_titlebar_tabs.c）在 `create_shadow_tile`
+  末尾 1 行钩子处覆写 tile —— 圆角矩形底（r=10）真高斯 σ=18、向下偏移 9px、峰值 alpha 0.78、
+  外缘 6px 渐隐（参数由 kcalc 的 Breeze 阴影 alpha 轮廓拟合：底缘 138/135/132... 现 136/132/128）。
+  margin 12→32（`SHADOW_MARGIN`，set_titlebar_tabs 的 metrics 块顺带改 width/horizontal）；
+  **交互 resize 边框仍是 12px**：`restrict_shadow_input_regions()` 把 8 个阴影 surface 的
+  input region 收窄到最内 12 逻辑 px（原生 KDE 阴影不吃鼠标）。tile 布局(stride/corner_size/
+  中段重复)未变，上游 render_shadows 切片和角补丁自动兼容；未聚焦仍走上游 alpha/2。
+
+- **底部圆角的阴影有直角透明缺口 —— ✅ 已修复（2026-08-05，kwin 截图四角逐一验证）**：
+  根因：CSD 阴影是 8 个 subsurface（`wl_client_side_decorations.c:638-645`），全部摆在窗口矩形**外侧**，
+  阴影蒙版按直角矩形生成（`create_shadow_mask`）；GL corner mask / `round_top_corners`
+  把角上圆外像素切成全透明，该区域没有 surface 覆盖 → 透出桌面。
+  修法（收在 `wl_titlebar_tabs.c` 的 "Corner shadow patches" 段）：4 个角各建一个
+  10 逻辑 px 的补丁 subsurface，`wl_subsurface_place_below` 压到主表面之下、空输入区域、
+  desync；像素直接取 shadow tile **矩形内侧**的模糊数据（tile corner_size=36 覆盖内侧 24px），
+  聚焦/未聚焦两套 buffer（未聚焦 alpha/2，同 render_shadows）；缩放变化按 R=round(10*fscale)
+  重建。钩子仅 2 行：`ensure_csd_resources` 末尾 update、`free_csd_surfaces` 头部 destroy
+  （全屏/隐藏 CSD 时清掉）。anim_harness 需多链 `../glfw/wayland-viewporter-client-protocol.c`
+  并 stub `createAnonymousFile`。
+  排障备忘：验证时若窗口内容冻结、日志刷 `TOPLEVEL_STATE_SUSPENDED`，是**会话锁屏**
+  （`loginctl unlock-session` 解锁），不是代码问题。
+
+- **拖拽 ghost 锁在标题栏内 —— 已被 DND 方案替代（2026-08-05）**：当时确认"不做"的独立 subsurface
+  ghost 方案，后来用上游 DND 拖拽（`GLFW_TITLEBAR_TAB_DRAG_OUT` → `start_tab_drag`）实现了跨窗口跟随，
+  系统 DND 缩略图（标题条 + 窗口截图）即扮演 macOS ghost；±40px 内的半透明 tab ghost 仍由
+  `wl_titlebar_tabs.c` 的 `show_drag_ghost()` 提供
 - 字体：Wayland 用 kitty 的 FreeType + 终端字体，不是桌面 UI 字体（`glfw/linux_desktop_settings.c` 里没有任何字体相关代码，要拿 UI 字体得自己读 gsettings / kdeglobals）
 - 窗口按钮在**右侧**且是 kitty 手绘的直线，不是 macOS 红绿灯；因此 tab 从 x=0 开始、右侧给按钮留空，布局相当于 macOS 的镜像
 - 标题栏无 vibrancy：CSD 的 titlebar buffer 是 `| 0xff000000` 的纯不透明色

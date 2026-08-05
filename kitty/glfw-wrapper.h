@@ -1804,7 +1804,8 @@ typedef enum GLFWTitlebarTabAction {
     GLFW_TITLEBAR_TAB_CLOSE,
     GLFW_TITLEBAR_TAB_NEW,
     GLFW_TITLEBAR_TAB_DROP,
-    GLFW_TITLEBAR_TAB_DETACH
+    GLFW_TITLEBAR_TAB_DETACH,
+    GLFW_TITLEBAR_TAB_DRAG_OUT  // hand the drag over to a real DND session (cross-window)
 } GLFWTitlebarTabAction;
 
 typedef void (* GLFWtitlebartabactionfun)(GLFWwindow *window, GLFWTitlebarTabAction action, unsigned long long tab_id, int index);
