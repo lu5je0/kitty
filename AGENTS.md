@@ -89,19 +89,33 @@ OSC 1337 ; SetUserVar=tui-bridge=<base64 of {"id":1,"module":"ime","method":"nor
 
 | 文件 | 改动内容 |
 |---|---|
-| `kitty/fork-ime.h` | **新文件，纯 fork 专属**，零冲突。承载全部逻辑：base64 解码、极简 JSON 字段匹配、`fork_ime_set_disabled()`、以及只读属性的 getter |
+| `kitty/fork-ime.h` | **新文件，纯 fork 专属**，零冲突。承载全部逻辑：base64 解码、极简 JSON 字段匹配、`fork_ime_set_disabled()`、以及 `ime_disabled` 属性的 getter/setter |
 | `kitty/vt-parser.c` | 加 2 行、删 0 行：include `fork-ime.h`，以及 `case 1337:` 开头一行 `if (code == 1337 && fork_ime_handle_osc1337(...)) break;`（必须在 `START_DISPATCH` 之前） |
 | `kitty/screen.h` | `ScreenModes` 里**单独一行** `bool mDISABLE_IME;`，不塞进上游那串 bool 列表，避免上游加模式时冲突 |
-| `kitty/screen.c` | 加 2 行、删 0 行：include `fork-ime.h`，以及 getsetters 数组里的 `{"ime_disabled", ...}`（只读，`GETSET` 宏用不了因为它要求有 setter） |
+| `kitty/screen.c` | 加 2 行、删 0 行：include `fork-ime.h`，以及 getsetters 数组里的 `{"ime_disabled", ...}`（手写一行，`GETSET` 宏用不了因为它假定字段名和属性名一致） |
 | `glfw/cocoa_window.m` | `keyDown:`/`flagsChanged:` 支持 filter 返回值 `2`；`keyDown:` 的 `else` 分支在 `ime_disabled` 时把 `UCKeyTranslate` 结果填进 `_glfw.ns.text`（排除 super/ctrl，见上面坑 1） |
 | `glfw/cocoa_platform.h` | `GLFWcocoatextinputfilterfun` typedef 上方补返回值约定注释 |
 | `kitty/glfw.c` | 上游的 `filter_option` **一字未改**，新增 `ime_disabled_for_focused_window()` + `cocoa_text_input_filter()` 包一层。唯一改的上游代码是安装那一行，改为**无条件安装** filter（原来只在 `macos_option_as_alt` 开启时装） |
-| `kitty_tests/ime_mode.py` | 单元测试：两个 method、RIS 清除、**其它 user var 不被吞**、畸形 payload 被忽略 |
+| `kitty/window.py` | `Window` 类**末尾追加** `enable_ime` action（见下） |
+| `kitty/fast_data_types.pyi` | `Screen.ime_disabled: bool` 类型声明，追加在属性列表末尾 |
+| `kitty_tests/ime_mode.py` | 单元测试：两个 method、RIS 清除、**其它 user var 不被吞**、畸形 payload 被忽略、属性可写 |
 | `kitty_tests/ime_e2e.py` | 端到端：真起一个 nvim（用真实 `~/.dotfiles` 配置）在 pty 里跑，验证 startup / InsertEnter / InsertLeave / CmdlineEnter / CmdlineLeave 五个状态。没有 nvim 或 dotfiles 时自动 skip |
 
 整体 merge footprint：**52 行新增、3 行删除**（`kitty/glfw.c` 的安装行 + `glfw/cocoa_window.m` 的两行 `process_text` 计算）。`kitty/modes.h` 完全没动。
 
 跑测试：`./test.py --module ime_mode` 和 `--module ime_e2e`。
+
+### 逃生阀：`enable_ime` action
+
+`Window.enable_ime` 只做一件事：`self.screen.ime_disabled = False`。用来救「rate limiter 把最后一次 enable 丢了」这类卡在禁用状态的情况。kitty.conf：
+
+```
+map ctrl+b>i enable_ime
+```
+
+- **一次性**，不是粘性覆盖。终端里的程序下一次发 `method=normal` 照样会再禁用（nvim 的 `ModeChanged` 很快就会来一次）。之所以不做粘性 override，是为了不在 `ScreenModes` 加第二个 bool，也不引入用户看不见的隐藏状态。
+- action 不需要在任何地方注册：`parse_key_action` 对无参 action 直接透传函数名，`Boss.dispatch_action` 会在 Boss / Tab / Window 上依次 `getattr`。
+- 因此 `screen.ime_disabled` 从只读变成可读写；setter 走 `fork_ime_set_disabled()`，和 OSC 路径同一个入口。
 
 ### 已知限制
 

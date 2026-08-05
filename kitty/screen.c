@@ -6437,7 +6437,7 @@ static PyGetSetDef getsetters[] = {
     GETSET(cursor_key_mode)
     GETSET(disable_ligatures)
     GETSET(render_unfocused_cursor)
-    {"ime_disabled", (getter)ime_disabled_get, NULL, NULL, NULL},  // fork-local, see fork-ime.h
+    {"ime_disabled", (getter)ime_disabled_get, (setter)ime_disabled_set, NULL, NULL},  // fork-local, see fork-ime.h
     {NULL}  /* Sentinel */
 };
 

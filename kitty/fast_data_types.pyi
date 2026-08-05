@@ -1067,6 +1067,7 @@ class Screen:
     auto_repeat_enabled: bool
     render_unfocused_cursor: bool
     last_reported_cwd: Optional[bytes]
+    ime_disabled: bool  # fork-local, see fork-ime.h
 
     def __init__(
         self,
