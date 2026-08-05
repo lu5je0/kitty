@@ -73,11 +73,20 @@ fork_ime_handle_osc1337(Screen *screen, const char *payload, size_t sz) {
     return false;
 }
 
-/* Read-only Screen.ime_disabled, so the state is observable from tests and from
- * the debug shell. Wired into screen.c's getsetters. */
+/* Screen.ime_disabled, so the state is observable from tests and from the debug
+ * shell, and settable by the enable_ime action. Wired into screen.c's getsetters. */
 static inline PyObject*
 ime_disabled_get(Screen *self, void *closure UNUSED) {
     PyObject *ans = self->modes.mDISABLE_IME ? Py_True : Py_False;
     Py_INCREF(ans);
     return ans;
+}
+
+static inline int
+ime_disabled_set(Screen *self, PyObject *val, void *closure UNUSED) {
+    if (!val) { PyErr_SetString(PyExc_TypeError, "cannot delete ime_disabled"); return -1; }
+    const int is_true = PyObject_IsTrue(val);
+    if (is_true < 0) return -1;
+    fork_ime_set_disabled(self, is_true == 1);
+    return 0;
 }

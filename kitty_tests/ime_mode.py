@@ -58,3 +58,12 @@ class TestDisableIME(BaseTest):
         ):
             parse_bytes(s, payload)
             self.assertFalse(s.ime_disabled, f'unexpectedly disabled by {payload!r}')
+
+    def test_ime_disabled_is_writable(self):
+        # backs the enable_ime action, which is one shot: a later OSC wins again
+        s = self.create_screen()
+        parse_bytes(s, tui_bridge('normal'))
+        s.ime_disabled = False
+        self.assertFalse(s.ime_disabled)
+        parse_bytes(s, tui_bridge('normal'))
+        self.assertTrue(s.ime_disabled)

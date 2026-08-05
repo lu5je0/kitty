@@ -2840,6 +2840,16 @@ class Window:
         url = docs_url(which)
         get_boss().open_url(url)
 
+    @ac('misc', '''
+        Re-enable the IME for this window (fork-local, see agents.md)
+
+        One shot: a subsequent OSC from the program running in the window can disable it again::
+
+            map ctrl+b>i enable_ime
+        ''')
+    def enable_ime(self) -> None:
+        self.screen.ime_disabled = False
+
     # }}}
 
 
