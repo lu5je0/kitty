@@ -9,10 +9,10 @@
 
 **当前状态（2026-08-05，最新提交已推送 origin）**：Stage 1-3 全部完成并验证 ——
 静态渲染 + 命中/点击语义（Stage 2）、5 种 0.18s ease-out 动画（真机中间帧 + `.wl-test/anim_harness.c`
-离屏 10 项断言）、配色逐像素对齐 macos.png（bar #393A39 / active tab #626366，`forced_appearance`
+离屏 18 项断言，含 1.25x/2x 分数缩放）、配色逐像素对齐 macos.png（bar #393A39 / active tab #626366，`forced_appearance`
 尊重 `macos_titlebar_color dark`）、四角圆角（顶角 CSD、底角 GL corner mask）、标题省略号截断、
 拖拽闪动修复（常驻 desync）、紧凑窗口按钮（无圆底细线风格，chevron 臂 5.0 / × 臂 4.5）。
-剩余：hover/拖拽滑入人工确认、跨窗口拖拽（Stage 4，上游 mime 方案）、mutter/sway 实测、分数缩放实测。
+剩余：hover/拖拽滑入人工确认、跨窗口拖拽（Stage 4，上游 mime 方案）、mutter/sway 实测、分数缩放真机观感。
 ghost 拖出栏外跟随 Y 已确认**不做**（见"已知会退化的点"）。
 
 ---
@@ -236,8 +236,9 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
   `desynced_subsurface` 指针变化重申，子表面重建后自动恢复），不再来回切换。
   代价：resize 时标题栏与主表面原子性略降，可接受
 - **离屏动画 harness**（`.wl-test/anim_harness.c`，已随仓库提交）：假时钟（替身 `monotonic_()`）驱动
-  wl_titlebar_tabs.c 真实代码，10 项断言：初始布局配色、hover 渐入/渐出中间值、拖拽激活、
-  DROP index、重排滑入中间帧与收敛、垂死 tab 淡出与 reap、timer 自动停。
+  wl_titlebar_tabs.c 真实代码，18 项断言：初始布局配色、hover 渐入/渐出中间值、拖拽激活、
+  DROP index、重排滑入中间帧与收敛、垂死 tab 淡出与 reap、timer 自动停；
+  另有 1.25x/2x 分数缩放套件（像素扫描定位 tab run，逻辑坐标驱动命中/hover/DROP）。
   编译：`gcc -D_GLFW_WAYLAND -DHAS_MEMFD_CREATE -I../glfw -I.. anim_harness.c ../glfw/wl_titlebar_tabs.c
   $(pkg-config --cflags dbus-1 xkbcommon) $(pkg-config --cflags --libs wayland-client) -lm`
 
