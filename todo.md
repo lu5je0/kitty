@@ -251,6 +251,9 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 
 ## 已知会退化的点（记录，不必修）
 
+- **拖拽 ghost 锁在标题栏内**（macOS 上超出栏 ±40px 后 ghost 跟随光标画到栏外）：
+  需要独立 subsurface，无法自动化测试且协议错误会杀掉整个连接。
+  用户已确认**接受，不做**（2026-08-05）。拖出 ±40px 松手撕下（DETACH）功能本身正常
 - 字体：Wayland 用 kitty 的 FreeType + 终端字体，不是桌面 UI 字体（`glfw/linux_desktop_settings.c` 里没有任何字体相关代码，要拿 UI 字体得自己读 gsettings / kdeglobals）
 - 窗口按钮在**右侧**且是 kitty 手绘的直线，不是 macOS 红绿灯；因此 tab 从 x=0 开始、右侧给按钮留空，布局相当于 macOS 的镜像
 - 标题栏无 vibrancy：CSD 的 titlebar buffer 是 `| 0xff000000` 的纯不透明色
