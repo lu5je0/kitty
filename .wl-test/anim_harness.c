@@ -27,7 +27,7 @@ bool csd_set_titlebar_color(_GLFWwindow *w UNUSED, uint32_t c UNUSED, bool s UNU
 
 #define BAR_W 800
 #define BAR_H 28
-static uint32_t bar_buf[BAR_W * BAR_H];
+static uint32_t bar_buf[BAR_W * 60];  // tall enough for 28 logical px at 2x
 #define BAR_BG 0x393A39u  // forced dark + focused parity colour
 static unsigned render_count = 0;
 static void render(void) {
@@ -84,6 +84,49 @@ static void set_tabs3(unsigned long long a, unsigned long long b, unsigned long 
         {.tab_id = c, .title = "three", .is_active = false, .needs_attention = false, .fg = 0xcccccc, .bg = cols[c]},
     };
     glfwWaylandSetTitlebarTabs((GLFWwindow*)&test_window, tabs, 3, BAR_BG, false, 2);
+}
+
+// Fractional scale smoke checks: geometry is discovered by scanning pixel
+// runs instead of predicting the scaled layout, then hover/drag are driven
+// with logical coordinates like the real pointer path.
+static int find_run(uint32_t want, int y, int start_x, int *run_w) {
+    int x = start_x;
+    while (x < BAR_W && cdist(px(x, y), want) > 2) x++;
+    if (x >= BAR_W) return -1;
+    int e = x;
+    while (e < BAR_W && cdist(px(e, y), want) <= 2) e++;
+    *run_w = e - x;
+    return x;
+}
+
+static void run_scale_checks(double f, unsigned long long win_id) {
+    test_window.id = win_id;  /* fresh per-scale state */
+    _glfw.focusedWindowId = win_id;
+    test_window.wl.decorations.for_window_state.fscale = f;
+    test_window.wl.decorations.titlebar.buffer.height = (int)(BAR_H * f);  // bar height scales too
+    const int y = (int)(14 * f);
+    set_tabs3(1, 2, 3);
+    render();
+    int w0 = 0, w1 = 0, w2 = 0;
+    const int x0 = find_run(C0, y, 0, &w0);
+    const int x1 = x0 < 0 ? -1 : find_run(C1, y, x0 + w0, &w1);
+    const int x2 = x1 < 0 ? -1 : find_run(C2, y, x1 + w1, &w2);
+    CHECK(x0 >= 0 && x1 > x0 && x2 > x1, "scale %.2f: tabs in order (%d, %d, %d)", f, x0, x1, x2);
+    if (x2 < 0) return;
+    CHECK(abs(w0 - w1) <= 2 && abs(w1 - w2) <= 2, "scale %.2f: uniform widths (%d, %d, %d)", f, w0, w1, w2);
+    const double lx = (x1 + w1 / 2) / f, ly = y / f;
+    CHECK(wl_titlebar_tabs_handle_motion(&test_window, lx, ly), "scale %.2f: motion hits tab1", f);
+    fake_now += ms_to_monotonic_t(300ll); render();
+    const uint32_t hover_full = mixc(C1, 0xffffff, 0.08);
+    CHECK(cdist(px(x1 + w1 / 2, y), hover_full) <= 2, "scale %.2f: hover colour, got %06x", f, px(x1 + w1 / 2, y));
+    wl_titlebar_tabs_handle_leave(&test_window);
+    fake_now += ms_to_monotonic_t(300ll); render();
+    wl_titlebar_tabs_handle_button(&test_window, 0x110, 1, (x0 + w0 / 2) / f, ly);
+    wl_titlebar_tabs_handle_motion(&test_window, (x2 + w2 / 2) / f, ly);
+    wl_titlebar_tabs_handle_button(&test_window, 0x110, 0, (x2 + w2 / 2) / f, ly);
+    CHECK(last_action == GLFW_TITLEBAR_TAB_DROP && last_action_tab == 1 && last_action_index == 2,
+          "scale %.2f: drop idx, got action %d tab %llu idx %d", f, last_action, last_action_tab, last_action_index);
+    fake_now += ms_to_monotonic_t(300ll); render();
 }
 
 int main(void) {
@@ -155,6 +198,10 @@ int main(void) {
     timer_cb(42, NULL);  // reaps the dead entry, then disables the timer
     timer_cb(42, NULL);
     CHECK(timer_enabled == 0, "timer stops when nothing animates");
+
+    // fractional scale smoke suites
+    run_scale_checks(1.25, 8);
+    run_scale_checks(2.0, 9);
 
     if (failures) { printf("%d FAILURES\n", failures); return 1; }
     printf("all animation harness checks passed (%u renders)\n", render_count);
