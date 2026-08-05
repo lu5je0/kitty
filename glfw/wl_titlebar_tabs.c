@@ -54,10 +54,10 @@
 // the reference screenshot: bare full-opacity glyphs, no hover circle, hover
 // feedback is a slightly thicker stroke.
 #define BUTTON_CELL_WIDTH 28.
-#define BUTTON_CHEVRON_ARM 6.5
+#define BUTTON_CHEVRON_ARM 5.0
 #define BUTTON_CHEVRON_RISE 0.4  // vertical half-extent = arm * this
-#define BUTTON_CROSS_ARM 5.5
-#define BUTTON_STROKE_WIDTH 1.4
+#define BUTTON_CROSS_ARM 4.5
+#define BUTTON_STROKE_WIDTH 1.3
 #define BUTTON_HOVER_STROKE_MULT 1.45
 #define DRAG_THRESHOLD 4.
 #define DETACH_MARGIN 40.
@@ -148,6 +148,8 @@ typedef struct WaylandTabBarState {
     // 0 = follow system scheme, 1 = forced light, 2 = forced dark
     // (mirrors macos_titlebar_color light/dark for cross-platform parity)
     int forced_appearance;
+    // the titlebar subsurface we last switched to desync mode (see render_bar)
+    struct wl_subsurface *desynced_subsurface;
     struct WaylandTabBarState *next;
 } WaylandTabBarState;
 
@@ -592,6 +594,15 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     const double fscale = decs.for_window_state.fscale;
     Canvas bar = {.px = (uint32_t*)output, .width = (int)decs.titlebar.buffer.width, .height = (int)decs.titlebar.buffer.height};
 
+    // Keep the titlebar subsurface desynced while tabs are shown. The default
+    // sync mode latches commits until the parent (GL) surface commits; mixing
+    // those latched frames with the animation timer's immediate commits shows
+    // buffers out of order, which flickered visibly while dragging tabs.
+    if (decs.titlebar.subsurface && decs.titlebar.subsurface != s->desynced_subsurface) {
+        wl_subsurface_set_desync(decs.titlebar.subsurface);
+        s->desynced_subsurface = decs.titlebar.subsurface;
+    }
+
     // Pixel parity with the macOS build. macos_titlebar_color light/dark is
     // honored here too (an explicit wayland_titlebar_color still wins), and
     // the system-color path uses the measured macOS titlebar colors: the
@@ -700,20 +711,11 @@ anim_tick(id_type timer_id UNUSED, void *data UNUSED) {
         }
         if (!state_animating(s)) continue;
         any_active = true;
-        // the titlebar subsurface is sync by default: its commits would sit
-        // pending until the parent (GL) surface commits. Animation frames must
-        // show up on their own, so switch to desync while animating.
-        if (decs.titlebar.subsurface) wl_subsurface_set_desync(decs.titlebar.subsurface);
         csd_change_title(window);
     }
     if (!any_active && anim_timer_enabled) {
         toggleTimer(&_glfw.wl.eventLoopData, anim_timer, 0);
         anim_timer_enabled = false;
-        // restore sync mode so resizes stay atomic with the main surface
-        for (WaylandTabBarState *s = all_states; s; s = s->next) {
-            _GLFWwindow *window = _glfwWindowForId(s->window_id);
-            if (window && decs.titlebar.subsurface) wl_subsurface_set_sync(decs.titlebar.subsurface);
-        }
     }
 }
 
