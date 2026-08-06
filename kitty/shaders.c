@@ -1683,6 +1683,8 @@ draw_bottom_corner_masks(OSWindow *os_window) {
     if (r <= 0 || w < 2 * r || h < r) return;
     bind_program(CORNER_MASK_PROGRAM);
     const GLint rect_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "rect");
+    const GLint border_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "border_color");
+    glUniform4f(border_loc, 0.f, 0.f, 0.f, 0.f);  // cut mode
     glEnable(GL_BLEND);
     glBlendFunc(GL_ZERO, GL_SRC_ALPHA);  // dst *= coverage
     // bottom-left corner; circle centers are in framebuffer coords (origin bottom-left)
@@ -1692,6 +1694,32 @@ draw_bottom_corner_masks(OSWindow *os_window) {
     restore_viewport();
     // bottom-right corner
     glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, 0.f);
+    save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // macOS-style light inner window border, 1 logical px white@0.20 (the top
+    // edge and titlebar sides are drawn in the CSD buffer by wl_titlebar_tabs.c)
+    GLsizei bw = (GLsizei)(xscale + 0.5f);
+    if (bw < 1) bw = 1;
+    const float ba = 0.20f;
+    glUniform4f(border_loc, ba, ba, ba, ba);  // premultiplied white
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUniform4f(rect_loc, 0.f, 0.f, 0.f, (float)bw);  // solid mode
+    save_viewport_using_top_left_origin(0, 0, bw, h - r, h);  // left edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(w - bw, 0, bw, h - r, h);  // right edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(r, h - bw, w - 2 * r, bw, h);  // bottom edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // bottom corner arcs
+    glUniform4f(rect_loc, (float)r, (float)r, (float)r, (float)bw);
+    save_viewport_using_top_left_origin(0, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, (float)bw);
     save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();

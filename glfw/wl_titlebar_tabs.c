@@ -38,28 +38,39 @@ tabs_debug_enabled(void) {
 }
 #define TABS_DEBUG(...) do { if (tabs_debug_enabled()) { fprintf(stderr, "[titlebar-tabs] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
 
-// Logical (unscaled) metrics, must match the macOS implementation
-#define TAB_MAX_WIDTH 200.
-#define TAB_MIN_WIDTH 60.
-#define TAB_HEIGHT 24.
-#define TAB_SPACING 4.
-#define TAB_CORNER_RADIUS 6.
-#define PLUS_BUTTON_WIDTH 28.
-#define TAB_BAR_LEFT_MARGIN 8.
-#define BAR_RIGHT_PADDING 8.
-#define CLOSE_RECT_SIZE 14.
-#define CLOSE_RECT_RIGHT_OFFSET 20.  // close rect x = tab_w - 20
-#define CLOSE_HIT_EXPAND 2.
-#define CLOSE_CROSS_INSET 4.25
-#define STROKE_WIDTH 1.2
-#define PLUS_ARM 5.0
-#define TEXT_LEFT_PADDING 8.
-#define TEXT_RIGHT_MARGIN 22.
-#define TEXT_SIZE 12.
-// visible titlebar height (logical) when tabs are shown; 24px tabs centered in it.
-// Measured from macos.png: the macOS titlebar with tabs is 28 logical px tall.
-#define TABS_TITLEBAR_HEIGHT 28
+// Logical (unscaled) metrics: the macOS values scaled by PT_PARITY.
+// macOS lays text out at 72 dpi while Linux effectively uses ~96, so the
+// same-looking terminal cell takes fewer logical px on macOS; with the macOS
+// tab metrics used verbatim the bar reads too small next to equal-size text.
+// Measured side by side (equal cell size, macos.png vs kwin): mac tab 48
+// physical px vs ours 41 -> scale the bar metrics by 7/6.
+#define PT_PARITY (7. / 6.)
+#define TAB_MAX_WIDTH (200. * PT_PARITY)
+#define TAB_MIN_WIDTH (60. * PT_PARITY)
+#define TAB_HEIGHT (24. * PT_PARITY)
+#define TAB_SPACING (4. * PT_PARITY)
+#define TAB_CORNER_RADIUS (6. * PT_PARITY)
+#define PLUS_BUTTON_WIDTH (28. * PT_PARITY)
+#define TAB_BAR_LEFT_MARGIN (16. * PT_PARITY)
+#define BAR_RIGHT_PADDING (8. * PT_PARITY)
+#define CLOSE_RECT_SIZE (14. * PT_PARITY)
+#define CLOSE_RECT_RIGHT_OFFSET (20. * PT_PARITY)  // close rect x = tab_w - 20
+#define CLOSE_HIT_EXPAND (2. * PT_PARITY)
+#define CLOSE_CROSS_INSET (4.25 * PT_PARITY)
+#define STROKE_WIDTH (1.2 * PT_PARITY)
+#define PLUS_ARM (5.0 * PT_PARITY)
+#define TEXT_LEFT_PADDING (8. * PT_PARITY)
+#define TEXT_RIGHT_MARGIN (22. * PT_PARITY)
+#define TEXT_SIZE (12. * PT_PARITY)
+// visible titlebar height (logical) when tabs are shown. macOS (macos.png,
+// @2x) is 28: 1px light border overlaying the bar top + 1px bar + 24px tab
+// + 2px bar; 28 * PT_PARITY rounds to 33.
+#define TABS_TITLEBAR_HEIGHT 33
 #define WINDOW_TOP_CORNER_RADIUS 10.
+// macOS-style light inner window border, 1 logical px. Measured from
+// macos.png: top edge white@~0.30 over the bar, sides/bottom white@~0.20.
+#define BORDER_TOP_ALPHA 0.30
+#define BORDER_SIDE_ALPHA 0.20
 #define ATTENTION_COLOR 0xff9500u  // approximation of NSColor.systemOrange
 // compact window buttons (KDE-like size, drawn by us since the upstream ones
 // are bar-height sized which is too big for the 28px tabs bar). Style matches
@@ -73,10 +84,6 @@ tabs_debug_enabled(void) {
 #define BUTTON_HOVER_STROKE_MULT 1.45
 #define DRAG_THRESHOLD 4.
 #define DETACH_MARGIN 40.
-// window icon drawn at the far left of the bar (Linux only, no macOS analog:
-// there the traffic lights occupy that spot)
-#define ICON_SIZE 16.
-#define ICON_GAP 8.
 // Chrome/Breeze-style drop shadow for tabs windows. Parameters fitted to a
 // measured KDE Breeze shadow profile (gaussian sigma ~21 logical px, shifted
 // ~10 px down, peak alpha ~0.79), scaled down slightly so the tile margin
@@ -191,12 +198,6 @@ typedef struct WaylandTabBarState {
     int forced_appearance;
     // the titlebar subsurface we last switched to desync mode (see render_bar)
     struct wl_subsurface *desynced_subsurface;
-    // window icon: source pixels (straight RGBA) and a box-downscaled
-    // straight-alpha ARGB cache for the current render size
-    uint8_t *icon_rgba;
-    int icon_w, icon_h;
-    uint32_t *icon_scaled;
-    int icon_scaled_size;
     // shadow patches behind the four rounded-off window corners. The CSD
     // shadow subsurfaces all sit outside the window rectangle, so the corner
     // pixels cut to transparency (GL corner mask at the bottom, CSD
@@ -389,28 +390,11 @@ wl_titlebar_tabs_free(_GLFWwindow *window) {
             destroy_corner_patches(s);
             destroy_drag_ghost(s);
             free(s->tabs);
-            free(s->icon_rgba);
-            free(s->icon_scaled);
             free(s);
             return;
         }
         p = &(*p)->next;
     }
-}
-
-void
-wl_titlebar_tabs_set_window_icon(_GLFWwindow *window, int width, int height, const unsigned char *rgba) {
-    if (width <= 0 || height <= 0 || !rgba) return;
-    WaylandTabBarState *s = state_for_window(window->id, true);
-    if (!s) return;
-    const size_t sz = (size_t)width * height * 4;
-    uint8_t *copy = malloc(sz);
-    if (!copy) return;
-    memcpy(copy, rgba, sz);
-    free(s->icon_rgba);
-    s->icon_rgba = copy; s->icon_w = width; s->icon_h = height;
-    free(s->icon_scaled); s->icon_scaled = NULL; s->icon_scaled_size = 0;
-    if (s->count) decs.titlebar_needs_update = true;
 }
 
 bool
@@ -850,6 +834,52 @@ round_top_corners(Canvas *bar, double r) {
     }
 }
 
+// macOS-style 1 logical px light inner border on the titlebar part of the
+// window: straight top edge, the two top corner arcs, and the side columns.
+// Drawn before round_top_corners(); the arc stroke lies inside the boundary
+// the cut trims along, so the two compose cleanly.
+static void
+draw_titlebar_border(Canvas *bar, double r, double fscale) {
+    const double bw = fmax(1., round(fscale));
+    const int ir = (int)ceil(r), ibw = (int)ceil(bw);
+    // straight top edge between the arcs
+    for (int y = 0; y < ibw && y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        const double cov = fmin(1., bw - y);
+        for (int x = ir; x < bar->width - ir; x++)
+            row[x] = blend_argb(row[x], 0xffffffffu, cov * BORDER_TOP_ALPHA);
+    }
+    // side columns below the arcs
+    for (int y = ir; y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        for (int i = 0; i < ibw; i++) {
+            const double cov = fmin(1., bw - i);
+            const int xs[2] = {i, bar->width - 1 - i};
+            for (int k = 0; k < 2; k++) {
+                if (xs[k] < 0 || xs[k] >= bar->width) continue;
+                row[xs[k]] = blend_argb(row[xs[k]], 0xffffffffu, cov * BORDER_SIDE_ALPHA);
+            }
+        }
+    }
+    // top corner arcs: stroke band [r - bw, r], alpha fading from the top
+    // value at the horizontal end to the side value at the vertical end
+    for (int y = 0; y < ir && y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        const double topness = r > 0 ? fmax(0., (r - (y + 0.5)) / r) : 0;
+        const double alpha = BORDER_SIDE_ALPHA + (BORDER_TOP_ALPHA - BORDER_SIDE_ALPHA) * topness;
+        for (int i = 0; i < ir; i++) {
+            const int xs[2] = {i, bar->width - 1 - i};
+            for (int k = 0; k < 2; k++) {
+                const int x = xs[k];
+                if (x < 0 || x >= bar->width) continue;
+                const double cx = k == 0 ? r : bar->width - r;
+                const double cov = circle_coverage(x, y, cx, r, r) - circle_coverage(x, y, cx, r, r - bw);
+                if (cov > 0) row[x] = blend_argb(row[x], 0xffffffffu, cov * alpha);
+            }
+        }
+    }
+}
+
 static void
 render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas *bar, uint32_t fg, double fscale) {
     const int cell_w = (int)round(BUTTON_CELL_WIDTH * fscale);
@@ -965,69 +995,8 @@ wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
 }
 
 static int
-tabs_left_margin(WaylandTabBarState *s, double fscale) {
-    double m = TAB_BAR_LEFT_MARGIN;
-    if (s->icon_rgba) m += ICON_SIZE + ICON_GAP;
-    return (int)round(m * fscale);
-}
-
-// box-filter downscale of the straight-alpha RGBA icon to dst x dst px,
-// weighting colour by alpha to avoid dark fringes on transparent edges
-static void
-ensure_scaled_icon(WaylandTabBarState *s, int dst) {
-    if (!s->icon_rgba || dst <= 0 || (s->icon_scaled && s->icon_scaled_size == dst)) return;
-    free(s->icon_scaled);
-    s->icon_scaled = malloc((size_t)dst * dst * sizeof(uint32_t));
-    if (!s->icon_scaled) { s->icon_scaled_size = 0; return; }
-    s->icon_scaled_size = dst;
-    const int sw = s->icon_w, sh = s->icon_h;
-    for (int y = 0; y < dst; y++) {
-        const double sy0 = (double)y * sh / dst, sy1 = (double)(y + 1) * sh / dst;
-        for (int x = 0; x < dst; x++) {
-            const double sx0 = (double)x * sw / dst, sx1 = (double)(x + 1) * sw / dst;
-            double r = 0, g = 0, b = 0, a = 0, area = 0;
-            for (int yy = (int)sy0; yy < (int)ceil(sy1) && yy < sh; yy++) {
-                const double hgt = MIN(sy1, yy + 1.) - MAX(sy0, (double)yy);
-                for (int xx = (int)sx0; xx < (int)ceil(sx1) && xx < sw; xx++) {
-                    const double wdt = MIN(sx1, xx + 1.) - MAX(sx0, (double)xx);
-                    const double wt = hgt * wdt;
-                    const uint8_t *p = s->icon_rgba + 4 * ((size_t)yy * sw + xx);
-                    const double pa = p[3] / 255. * wt;
-                    r += p[0] * pa; g += p[1] * pa; b += p[2] * pa; a += pa;
-                    area += wt;
-                }
-            }
-            uint32_t out = 0;
-            if (area > 0 && a > 0) {
-                out = ((uint32_t)(a / area * 255 + 0.5) << 24)
-                    | ((uint32_t)MIN(255., r / a + 0.5) << 16)
-                    | ((uint32_t)MIN(255., g / a + 0.5) << 8)
-                    | (uint32_t)MIN(255., b / a + 0.5);
-            }
-            s->icon_scaled[(size_t)y * dst + x] = out;  // straight-alpha ARGB
-        }
-    }
-}
-
-static void
-render_bar_icon(WaylandTabBarState *s, Canvas *bar, double fscale) {
-    if (!s->icon_rgba) return;
-    const int dst = (int)round(ICON_SIZE * fscale);
-    ensure_scaled_icon(s, dst);
-    if (!s->icon_scaled || s->icon_scaled_size != dst) return;
-    const int x0 = (int)round(TAB_BAR_LEFT_MARGIN * fscale);
-    const int y0 = (bar->height - dst) / 2;
-    for (int y = 0; y < dst; y++) {
-        const int by = y0 + y;
-        if (by < 0 || by >= bar->height) continue;
-        for (int x = 0; x < dst; x++) {
-            const int bx = x0 + x;
-            if (bx < 0 || bx >= bar->width) continue;
-            const uint32_t p = s->icon_scaled[(size_t)y * dst + x];
-            uint32_t *d = bar->px + (size_t)by * bar->width + bx;
-            *d = blend_argb(*d, p, (p >> 24) / 255.);
-        }
-    }
+tabs_left_margin(double fscale) {
+    return (int)round(TAB_BAR_LEFT_MARGIN * fscale);
 }
 
 void
@@ -1065,11 +1034,10 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
 
     // window buttons first: they define how much room tabs have
     render_compact_window_buttons(window, s, &bar, fg, fscale);
-    render_bar_icon(s, &bar, fscale);
 
     // layout, all in scaled pixels; dying tabs keep their frozen geometry and
     // do not take part in it
-    const int left_margin = tabs_left_margin(s, fscale);
+    const int left_margin = tabs_left_margin(fscale);
     const int tab_h = (int)round(TAB_HEIGHT * fscale), spacing = (int)round(TAB_SPACING * fscale);
     const int plus_w = (int)round(PLUS_BUTTON_WIDTH * fscale);
     int n = 0;
@@ -1116,6 +1084,7 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     render_plus_button(s, &bar, bar_bg & 0xffffff, fscale);
     // in-bar ghost on top; hidden while torn off (the subsurface ghost shows)
     if (dragged && !s->drag_out) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);
+    draw_titlebar_border(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, fscale);
     round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
     s->layout_bar_width = bar.width;
     s->layout_fscale = fscale;
@@ -1227,7 +1196,7 @@ static int
 live_drop_index(WaylandTabBarState *s, int ghost_left, bool moving_right, double fscale) {
     const int step = s->tab_w + s->spacing;
     const int ghost_right = ghost_left + s->tab_w;
-    const int left_margin = tabs_left_margin(s, fscale);
+    const int left_margin = tabs_left_margin(fscale);
     int idx = 0, slot = 0;
     for (size_t i = 0; i < s->count; i++) {
         WaylandTabEntry *t = s->tabs + i;

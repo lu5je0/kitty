@@ -28,8 +28,8 @@ bool csd_set_titlebar_color(_GLFWwindow *w UNUSED, uint32_t c UNUSED, bool s UNU
 int createAnonymousFile(off_t size UNUSED) { return -1; }
 
 #define BAR_W 800
-#define BAR_H 28
-static uint32_t bar_buf[BAR_W * 60];  // tall enough for 28 logical px at 2x
+#define BAR_H 33
+static uint32_t bar_buf[BAR_W * 80];  // tall enough for 33 logical px at 2x
 #define BAR_BG 0x393A39u  // forced dark + focused parity colour
 static unsigned render_count = 0;
 static void render(void) {
@@ -145,7 +145,7 @@ int main(void) {
     test_window.wl.decorations.titlebar.buffer.width = BAR_W;
     test_window.wl.decorations.titlebar.buffer.height = BAR_H;
 
-    // layout with fscale 1: tabs at x = 8, 212, 416 (w=200, spacing 4), centres 108/312/516, y centre 14
+    // layout with fscale 1 (PT_PARITY metrics): tabs at x = 19, 237, 456 (w~213), sample points 108/312/516 all inside, y centre 14
     set_tabs3(1, 2, 3);
     render();
     CHECK(cdist(px(108, 14), C0) <= 2, "tab0 colour, got %06x", px(108, 14));
@@ -190,7 +190,7 @@ int main(void) {
 
     // --- drag far below the bar and release: DETACH ---
     wl_titlebar_tabs_handle_button(&test_window, 0x110, 1, 108, 14);
-    wl_titlebar_tabs_handle_motion(&test_window, 108, 120);  // 120 > bar 28 + margin 40
+    wl_titlebar_tabs_handle_motion(&test_window, 108, 120);  // 120 > bar 33 + margin 40
     wl_titlebar_tabs_handle_button(&test_window, 0x110, 0, 108, 120);
     CHECK(last_action == GLFW_TITLEBAR_TAB_DETACH && last_action_tab == 2,
           "detach below bar, got action %d tab %llu", last_action, last_action_tab);

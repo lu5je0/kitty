@@ -47,11 +47,11 @@
 | `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`、`tab_bar_hidden` 计算、`apply_options` 配置重载支持 |
 | `kitty/fast_data_types.pyi` | `set_titlebar_tabs` 类型声明 |
 | `setup.py` | 链接 `-framework QuartzCore`（Core Animation 需要）；Info.plist 加 `UIDesignRequiresCompatibility`（见下） |
-| `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（按 tab_id diff 保动画状态；强制 CSD、`visible_titlebar_height` 提到 28、立即重设 opaque region）。动画引擎：5 种 0.18s ease-out（位置/宽度、淡入/淡出、hover、变 active 配色）、文字 alpha 蒙版缓存、16ms 单例 timer + 动画期间 `wl_subsurface_set_desync`；非自定义色时用实测 macOS 标题栏色（深色聚焦 #393A39），`forced_appearance` 尊重 `macos_titlebar_color light/dark` |
+| `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（按 tab_id diff 保动画状态；强制 CSD、`visible_titlebar_height` 提到 33、立即重设 opaque region）。动画引擎：5 种 0.18s ease-out（位置/宽度、淡入/淡出、hover、变 active 配色）、文字 alpha 蒙版缓存、16ms 单例 timer + 动画期间 `wl_subsurface_set_desync`；非自定义色时用实测 macOS 标题栏色（深色聚焦 #393A39），`forced_appearance` 尊重 `macos_titlebar_color light/dark` |
 | `glfw/wl_client_side_decorations.c` | 仅加钩子：include 1 行、`render_title_bar()` 5 行（画 tab 后 `goto render_buttons`）、`update_hovered_button()` 1 行、`handle_pointer_button()` 1 行、`handle_pointer_leave()` 1 行、`csd_free_all_resources()` 1 行 |
 | `glfw/wl_window.c` | `update_regions()` 里 4 行：tabs 激活时 opaque region 挖掉底部两个 10×10 逻辑 px 角（配合 GL 圆角）；include 1 行 |
-| `kitty/shaders.c` | 枚举加 `CORNER_MASK_PROGRAM`、`C()` 导出 1 行、新 static `draw_bottom_corner_masks()`（帧末把底部两角像素乘以圆覆盖率，`GL_ZERO/GL_SRC_ALPHA`）+ `stop_os_window_rendering()` 末尾 1 行调用 |
-| `kitty/corner_mask_fragment.glsl` | **新文件，纯 fork 专属**：circle SDF coverage，复用 `rounded_rect_vertex.glsl` |
+| `kitty/shaders.c` | 枚举加 `CORNER_MASK_PROGRAM`、`C()` 导出 1 行、新 static `draw_bottom_corner_masks()`（帧末把底部两角像素乘以圆覆盖率，`GL_ZERO/GL_SRC_ALPHA`；同函数里还画内容区的 1px 浅色内描边：左右/底边 + 底角弧）+ `stop_os_window_rendering()` 末尾 1 行调用 |
+| `kitty/corner_mask_fragment.glsl` | **新文件，纯 fork 专属**：circle SDF coverage + `border_color` 描边模式，复用 `rounded_rect_vertex.glsl` |
 | `kitty/shaders.py` | import + 1 行编译 `corner_mask` program |
 | `kitty/state.h` | `OSWindow` 尾部单独一行 `bool wayland_titlebar_tabs_active;` |
 | `glfw/glfw3.h` | preamble 加 `GLFWTitlebarTab`/`GLFWTitlebarTabAction`/两个回调 typedef（`} GLFWgamepadstate;` 之后）；GLFWAPI 声明区末尾加 `glfwSetTitlebarTab{Action,Text}Callback` |
@@ -71,7 +71,10 @@
 ### 注意事项（Wayland）
 
 - 布局是 macOS 的**镜像**：窗口按钮在右侧（kitty 手绘），tab 从 x=0 开始，右侧给按钮留 `num_buttons*button_size + 8*scale`。
-- 标题栏高度：正常 CSD 是 24 逻辑 px；有 tab 时首次 `glfwWaylandSetTitlebarTabs` 会把**该窗口**的 `decs.metrics` 提到 28（从 macos.png 实测：24px tab + 上下各 2px），并把 `decs.for_window_state.width` 清零强制重建 shm 缓冲。没改 `csd_initialize_metrics()` 本身。
+- **PT_PARITY = 7/6**：macOS 按 72dpi 排文字、Linux 实际 ~96dpi，同样的 font_size 下 Linux 终端格子占更多逻辑 px，macOS 常量原样用会显得 tab 栏偏小（实测同格子大小下 mac tab 48 物理 px vs 我们 41）。所以 wl_titlebar_tabs.c 的全部 tab 度量常量 = macOS 值 × 7/6（tab 高 24→28、字号 12→14 等），窗口圆角/按钮/阴影不乘。
+- 标题栏高度：正常 CSD 是 24 逻辑 px；有 tab 时首次 `glfwWaylandSetTitlebarTabs` 会把**该窗口**的 `decs.metrics` 提到 33（macOS 实测 28：1px 浅描边叠在 bar 顶 + 1px bar + 24px tab + 2px bar，×7/6 取整 33）。并把 `decs.for_window_state.width` 清零强制重建 shm 缓冲。没改 `csd_initialize_metrics()` 本身。
+- **1px 浅色窗口内描边**（macos.png 实测：顶边 white@0.30、侧/底 white@0.20）：标题栏部分（顶边+顶角弧+侧列）由 `wl_titlebar_tabs.c` 的 `draw_titlebar_border()` 画进 CSD buffer（在 `round_top_corners` 之前）；内容区左右/底边+底角弧由 `kitty/shaders.c` 的 `draw_bottom_corner_masks()` 里的描边 pass 画（`corner_mask_fragment.glsl` 新增 `border_color` uniform：a==0 走原裁切模式，a>0 走描边/实心模式，`GL_ONE/GL_ONE_MINUS_SRC_ALPHA`）。
+- 左侧不画窗口 icon（曾画过，已移除，`_glfwPlatformSetWindowIcon` 的钩子行也删了）；tab 从 `TAB_BAR_LEFT_MARGIN`（16×7/6 逻辑 px）开始。
 - mutter 默认 SSD：`glfwWaylandSetTitlebarTabs` 里检测 `decs.serverSide` 时强制切 CLIENT_SIDE（照抄 `setXdgDecorations` 的 titlebar_hidden 分支）。
 - 所有 tab 几何都存 **scaled px**（`round(fscale*x)` 命中），分数缩放下勿混逻辑坐标。
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。

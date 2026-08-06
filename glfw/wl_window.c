@@ -1630,7 +1630,6 @@ void _glfwPlatformSetWindowTitle(_GLFWwindow* window, const char* title)
 
 void
 _glfwPlatformSetWindowIcon(_GLFWwindow* window, int count, const GLFWimage* images) {
-    if (count > 0 && images) wl_titlebar_tabs_set_window_icon(window, images[0].width, images[0].height, images[0].pixels);
     if (is_layer_shell(window)) {
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: Cannot set window icon on layer shell surfaces");
         return;

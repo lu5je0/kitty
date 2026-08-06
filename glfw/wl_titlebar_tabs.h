@@ -27,9 +27,6 @@ bool wl_titlebar_tabs_handle_leave(_GLFWwindow *window);
 // with a button held). button < 0 means motion. Hooked in wl_init.c.
 bool wl_titlebar_tabs_forward_grabbed_pointer(_GLFWwindow *window, int button, uint32_t state);
 void wl_titlebar_tabs_free(_GLFWwindow *window);
-// Caches the window icon (straight-alpha RGBA rows, top-left first) so the
-// bar can draw it at its far left. Called from _glfwPlatformSetWindowIcon.
-void wl_titlebar_tabs_set_window_icon(_GLFWwindow *window, int width, int height, const unsigned char *rgba);
 // Small shadow-filled subsurfaces below the parent surface that show through
 // the transparent notches left by the rounded corners. Update is called from
 // ensure_csd_resources; destroy from free_csd_surfaces.
