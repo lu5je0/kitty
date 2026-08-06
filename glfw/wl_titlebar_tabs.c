@@ -1062,7 +1062,9 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     const int min_w = (int)round(TAB_MIN_WIDTH * fscale), max_w = (int)round(TAB_MAX_WIDTH * fscale);
     if (tab_w < min_w) tab_w = min_w;
     if (tab_w > max_w) tab_w = max_w;
-    const int tab_y = (bar.height - tab_h) / 2;
+    // center within the area below the top border stroke, not the full bar
+    const int border_w = (int)fmax(1., round(fscale));
+    const int tab_y = (bar.height - tab_h + border_w) / 2;
     s->tab_w = tab_w; s->spacing = spacing; s->tab_y = tab_y; s->tab_h = tab_h;
     // window resizes and scale changes must not trail behind an animation
     const bool snap = s->layout_bar_width != bar.width || s->layout_fscale != fscale;
