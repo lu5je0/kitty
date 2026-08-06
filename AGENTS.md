@@ -74,7 +74,7 @@
 - **PT_PARITY = 7/6**：macOS 按 72dpi 排文字、Linux 实际 ~96dpi，同样的 font_size 下 Linux 终端格子占更多逻辑 px，macOS 常量原样用会显得 tab 栏偏小（实测同格子大小下 mac tab 48 物理 px vs 我们 41）。所以 wl_titlebar_tabs.c 的全部 tab 度量常量 = macOS 值 × 7/6（tab 高 24→28、字号 12→14 等），窗口圆角/按钮/阴影不乘。
 - 标题栏高度：正常 CSD 是 24 逻辑 px；有 tab 时首次 `glfwWaylandSetTitlebarTabs` 会把**该窗口**的 `decs.metrics` 提到 33（macOS 实测 28：1px 浅描边叠在 bar 顶 + 1px bar + 24px tab + 2px bar，×7/6 取整 33）。并把 `decs.for_window_state.width` 清零强制重建 shm 缓冲。没改 `csd_initialize_metrics()` 本身。
 - **1px 浅色窗口内描边**（macos.png 实测：顶边 white@0.30、侧/底 white@0.20）：标题栏部分（顶边+顶角弧+侧列）由 `wl_titlebar_tabs.c` 的 `draw_titlebar_border()` 画进 CSD buffer（在 `round_top_corners` 之前）；内容区左右/底边+底角弧由 `kitty/shaders.c` 的 `draw_bottom_corner_masks()` 里的描边 pass 画（`corner_mask_fragment.glsl` 新增 `border_color` uniform：a==0 走原裁切模式，a>0 走描边/实心模式，`GL_ONE/GL_ONE_MINUS_SRC_ALPHA`）。
-- 左侧不画窗口 icon（曾画过，已移除，`_glfwPlatformSetWindowIcon` 的钩子行也删了）；tab 从 `TAB_BAR_LEFT_MARGIN`（16×7/6 逻辑 px）开始。
+- 左侧不画窗口 icon（曾画过，已移除，`_glfwPlatformSetWindowIcon` 的钩子行也删了）；tab 从 `TAB_BAR_LEFT_MARGIN`（8×7/6 逻辑 px，左侧没有红绿灯按钮所以比 macOS 的 16 小）开始。
 - mutter 默认 SSD：`glfwWaylandSetTitlebarTabs` 里检测 `decs.serverSide` 时强制切 CLIENT_SIDE（照抄 `setXdgDecorations` 的 titlebar_hidden 分支）。
 - 所有 tab 几何都存 **scaled px**（`round(fscale*x)` 命中），分数缩放下勿混逻辑坐标。
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。

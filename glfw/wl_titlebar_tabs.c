@@ -51,7 +51,7 @@ tabs_debug_enabled(void) {
 #define TAB_SPACING (4. * PT_PARITY)
 #define TAB_CORNER_RADIUS (6. * PT_PARITY)
 #define PLUS_BUTTON_WIDTH (28. * PT_PARITY)
-#define TAB_BAR_LEFT_MARGIN (16. * PT_PARITY)
+#define TAB_BAR_LEFT_MARGIN (8. * PT_PARITY)
 #define BAR_RIGHT_PADDING (8. * PT_PARITY)
 #define CLOSE_RECT_SIZE (14. * PT_PARITY)
 #define CLOSE_RECT_RIGHT_OFFSET (20. * PT_PARITY)  // close rect x = tab_w - 20
