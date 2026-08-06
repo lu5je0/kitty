@@ -1454,6 +1454,10 @@ class Boss:
             tm.new_tab()
 
     def titlebar_tab_drop(self, payload: str) -> None:
+        # the button was released in-bar: cancel any DND handoff still pending
+        # from titlebar_tab_drag_out, its implicit grab is gone (EPERM)
+        from .fast_data_types import set_tab_being_dragged
+        set_tab_being_dragged()
         try:
             src_os_window_id, tab_id, dst_os_window_id, idx = map(int, payload.split())
         except Exception:
@@ -1486,6 +1490,10 @@ class Boss:
             focus_os_window(dst_os_window_id, True)
 
     def titlebar_tab_detach(self, payload: str) -> None:
+        # release beat the async DND handoff (titlebar_tab_drag_out): cancel
+        # it, the implicit grab is gone and start_drag would fail with EPERM
+        from .fast_data_types import set_tab_being_dragged
+        set_tab_being_dragged()
         try:
             os_window_id, tab_id = map(int, payload.split()[:2])
         except Exception:

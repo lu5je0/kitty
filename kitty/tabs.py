@@ -1753,8 +1753,12 @@ class TabManager:  # {{{
             with suppress(Exception):
                 idx_under_mouse = old_tab_ids.index(tab_id_under_mouse)
         if idx_under_mouse < 0:
-            start = self.tab_bar.window_geometry.top if self.tab_bar.is_vertical else self.tab_bar.window_geometry.left
-            idx_under_mouse = 0 if coordinate < start else len(old_tab_ids) - 1
+            if self.tab_bar.laid_out_once:
+                start = self.tab_bar.window_geometry.top if self.tab_bar.is_vertical else self.tab_bar.window_geometry.left
+                idx_under_mouse = 0 if coordinate < start else len(old_tab_ids) - 1
+            else:
+                # native titlebar tabs: the grid tab bar is never laid out
+                idx_under_mouse = len(old_tab_ids) - 1
         old_idx_under_mouse = old_tab_ids.index(tab_id)
         idx_moved_towards_start = old_idx_under_mouse > idx_under_mouse
         new_tab_ids = old_tab_ids
