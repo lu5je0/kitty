@@ -193,6 +193,13 @@ typedef struct WaylandTabBarState {
     int tab_w, spacing, tab_y, tab_h, tabs_area_right;
     int layout_bar_width;       // bar width the move anims were computed for
     double layout_fscale;
+    // off-screen canvas the bar is composed in before one memcpy into the shm
+    // buffer: the CSD buffer pair is reused without waiting for wl_buffer
+    // release, so during high-frequency drag redraws the compositor can
+    // sample a buffer mid-render; rendering in place flashed the cleared bar
+    // (no tabs, no border) visibly while dragging tabs
+    uint32_t *render_scratch;
+    size_t render_scratch_sz;
     // 0 = follow system scheme, 1 = forced light, 2 = forced dark
     // (mirrors macos_titlebar_color light/dark for cross-platform parity)
     int forced_appearance;
@@ -390,6 +397,7 @@ wl_titlebar_tabs_free(_GLFWwindow *window) {
             destroy_corner_patches(s);
             destroy_drag_ghost(s);
             free(s->tabs);
+            free(s->render_scratch);
             free(s);
             return;
         }
@@ -1005,6 +1013,13 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     if (!s || !s->count) return;
     const double fscale = decs.for_window_state.fscale;
     Canvas bar = {.px = (uint32_t*)output, .width = (int)decs.titlebar.buffer.width, .height = (int)decs.titlebar.buffer.height};
+    const size_t bar_sz = (size_t)bar.width * bar.height * sizeof(uint32_t);
+    if (s->render_scratch_sz != bar_sz) {
+        free(s->render_scratch);
+        s->render_scratch = malloc(bar_sz);
+        s->render_scratch_sz = s->render_scratch ? bar_sz : 0;
+    }
+    if (s->render_scratch) bar.px = s->render_scratch;
 
     // Keep the titlebar subsurface desynced while tabs are shown. The default
     // sync mode latches commits until the parent (GL) surface commits; mixing
@@ -1086,6 +1101,7 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     if (dragged && !s->drag_out) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);
     draw_titlebar_border(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, fscale);
     round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
+    if (bar.px != (uint32_t*)output) memcpy(output, bar.px, bar_sz);
     s->layout_bar_width = bar.width;
     s->layout_fscale = fscale;
 }
