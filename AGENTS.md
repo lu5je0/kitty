@@ -43,8 +43,8 @@
 | `kitty/cocoa_window.h` | `TitlebarTabInfo` 结构、五个新 `CocoaPendingAction` 枚举、函数声明 |
 | `kitty/glfw.c` | Python API `set_titlebar_tabs`（`NativeTabInfo` 宏共享 macOS/Wayland 解析循环）+ 注册到 module_methods；`titlebar_tab_text_callback` / `titlebar_tab_action_callback`（非 Apple 分支，在 `glfw_init` 里和 `glfwSetDrawTextFunction` 一起注册）；Wayland 分支透传 `forced_appearance`（`macos_titlebar_color` light/dark）并置 `w->wayland_titlebar_tabs_active`（底部圆角开关） |
 | `kitty/child-monitor.c` | `process_cocoa_pending_actions` 中五个新 action 的 `call_boss` 转发 |
-| `kitty/boss.py` | `titlebar_tab_activate/close/new/drop/detach` 五个 handler |
-| `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`、`tab_bar_hidden` 计算、`apply_options` 配置重载支持 |
+| `kitty/boss.py` | `titlebar_tab_activate/close/new/drop/detach/drag_out` handler；drop/detach 开头 `set_tab_being_dragged()` 取消挂起的 DND handoff（松键快于异步缩略图回调时，implicit grab 已失效，晚到的 start_drag 会 EPERM） |
+| `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`、`tab_bar_hidden` 计算、`apply_options` 配置重载支持；**改了上游 `on_tab_drop_move` 3 行**：`window_geometry` 访问前加 `laid_out_once` 判断（native tabs 下网格 tab bar 从不 layout，否则跨窗口拖拽 AttributeError），合并冲突时保留该 guard |
 | `kitty/fast_data_types.pyi` | `set_titlebar_tabs` 类型声明 |
 | `setup.py` | 链接 `-framework QuartzCore`（Core Animation 需要）；Info.plist 加 `UIDesignRequiresCompatibility`（见下） |
 | `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（按 tab_id diff 保动画状态；强制 CSD、`visible_titlebar_height` 提到 33、立即重设 opaque region）。动画引擎：5 种 0.18s ease-out（位置/宽度、淡入/淡出、hover、变 active 配色）、文字 alpha 蒙版缓存、16ms 单例 timer + 动画期间 `wl_subsurface_set_desync`；非自定义色时用实测 macOS 标题栏色（深色聚焦 #393A39），`forced_appearance` 尊重 `macos_titlebar_color light/dark` |
