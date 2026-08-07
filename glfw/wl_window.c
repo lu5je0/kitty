@@ -32,6 +32,7 @@
 #include "backend_utils.h"
 #include "linux_notify.h"
 #include "wl_client_side_decorations.h"
+#include "wl_titlebar_tabs.h"
 #include "../kitty/monotonic.h"
 
 #include <stdio.h>
@@ -339,6 +340,12 @@ update_regions(_GLFWwindow* window) {
         struct wl_region* region = wl_compositor_create_region(_glfw.wl.compositor);
         if (!region) return;
         wl_region_add(region, 0, 0, window->wl.width, window->wl.height);
+        // fork: the GL renderer cuts rounded bottom corners (radius 10) when
+        // titlebar tabs are shown; those pixels must not be marked opaque
+        if (wl_titlebar_tabs_active(window)) {
+            wl_region_subtract(region, 0, window->wl.height - 10, 10, 10);
+            wl_region_subtract(region, window->wl.width - 10, window->wl.height - 10, 10, 10);
+        }
         // Makes the surface considered as XRGB instead of ARGB.
         wl_surface_set_opaque_region(window->wl.surface, region);
         wl_region_destroy(region);
@@ -3638,7 +3645,7 @@ _glfwPlatformStartDrag(_GLFWwindow* window, const GLFWimage* thumbnail) {
         return ENOTSUP;
     }
 
-    if (_glfw.wl.pointer_button_count == 0) {
+    if (_glfw.wl.pointer_button_count == 0 && !wl_titlebar_tabs_any_drag_active()) {
         // start_drag requires the serial of an active pointer implicit grab,
         // without one the compositor silently ignores the request and the
         // data source never receives any events, so fail early instead.

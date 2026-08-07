@@ -30,6 +30,7 @@
 #include "internal.h"
 #include "backend_utils.h"
 #include "wl_client_side_decorations.h"
+#include "wl_titlebar_tabs.h"
 #include "linux_desktop_settings.h"
 #include "../kitty/monotonic.h"
 #include "wl_text_input.h"
@@ -127,6 +128,7 @@ pointerHandleMotion(void* data UNUSED, struct wl_pointer* pointer UNUSED, uint32
     if (!window || window->cursorMode == GLFW_CURSOR_DISABLED) return;
     window->wl.allCursorPosX = wl_fixed_to_double(sx);
     window->wl.allCursorPosY = wl_fixed_to_double(sy);
+    if (wl_titlebar_tabs_forward_grabbed_pointer(window, -1, 0)) return;
     if (window->wl.decorations.focus != CENTRAL_WINDOW) {
         csd_handle_pointer_event(window, -1, -1, NULL);
     } else {
@@ -152,6 +154,7 @@ static void pointerHandleButton(void* data UNUSED,
 
     _GLFWwindow* window = _glfw.wl.pointerFocus;
     if (!window) return;
+    if (wl_titlebar_tabs_forward_grabbed_pointer(window, (int)button, state)) return;
     if (window->wl.decorations.focus != CENTRAL_WINDOW) {
         csd_handle_pointer_event(window, button, state, NULL);
         return;

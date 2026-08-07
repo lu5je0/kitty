@@ -287,6 +287,7 @@ CELL_BG_PROGRAM: int
 BLIT_PROGRAM: int
 SCREENSHOT_PROGRAM: int
 ROUNDED_RECT_PROGRAM: int
+CORNER_MASK_PROGRAM: int
 DECORATION: int
 BLINK: int
 DIM: int
@@ -814,7 +815,7 @@ def cocoa_hide_other_apps() -> None:
 def cocoa_minimize_os_window(os_window_id: Optional[int] = None) -> None:
     pass
 
-def cocoa_set_titlebar_tabs(os_window_id: int, tabs: Tuple[Tuple[int, str, bool, bool, int, int], ...]) -> None:
+def set_titlebar_tabs(os_window_id: int, tabs: Tuple[Tuple[int, str, bool, bool, int, int], ...]) -> None:
     pass
 
 def locale_is_valid(name: str) -> bool:

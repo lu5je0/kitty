@@ -25,6 +25,7 @@ definition.add_deprecation('deprecated_macos_show_window_title_in_menubar_alias'
 definition.add_deprecation('deprecated_send_text', 'send_text')
 definition.add_deprecation('deprecated_adjust_line_height', 'adjust_line_height', 'adjust_column_width', 'adjust_baseline')
 definition.add_deprecation('deprecated_scrollback_indicator_opacity', 'scrollback_indicator_opacity')
+definition.add_deprecation('deprecated_macos_titlebar_tabs_alias', 'macos_titlebar_tabs')
 
 agr = definition.add_group
 egr = definition.end_group
@@ -3278,15 +3279,17 @@ Note that when using :ref:`auto_color_scheme` this option is overridden by the c
 )
 
 opt(
-    'macos_titlebar_tabs',
+    'native_titlebar_tabs',
     'no',
     option_type='to_bool',
     long_text="""
-Show the tab bar as native macOS tabs in the window titlebar, similar to
-WezTerm. When enabled, the normal in-terminal tab bar is hidden and tabs are
-drawn in the titlebar with close buttons and a new tab button. Note that this
-requires the titlebar to be visible, so it is incompatible with
-:opt:`hide_window_decorations`. macOS only.
+Show the tab bar as native tabs in the window titlebar, similar to WezTerm. When
+enabled, the normal in-terminal tab bar is hidden and tabs are drawn in the
+titlebar with close buttons and a new tab button. Note that this requires the
+titlebar to be visible, so it is incompatible with
+:opt:`hide_window_decorations`. Works on macOS and on Wayland; on Wayland client
+side decorations are forced on, since the tabs are drawn by kitty. Has no effect
+on X11, where the tab bar falls back to the normal in-terminal one.
 """,
 )
 

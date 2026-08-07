@@ -17,7 +17,7 @@ from typing import Any, Concatenate, Deque, Literal, NamedTuple, Optional, Param
 from .borders import Border, Borders
 from .child import Child
 from .cli_stub import CLIOptions, SaveAsSessionOptions
-from .constants import appname, is_macos
+from .constants import appname, is_macos, is_wayland
 from .fast_data_types import (
     GLFW_MOUSE_BUTTON_LEFT,
     GLFW_MOUSE_BUTTON_MIDDLE,
@@ -26,7 +26,6 @@ from .fast_data_types import (
     add_tab,
     attach_window,
     buffer_keys_in_window,
-    cocoa_set_titlebar_tabs,
     current_focused_os_window_id,
     detach_window,
     draw_single_line_of_text,
@@ -50,6 +49,7 @@ from .fast_data_types import (
     set_active_window,
     set_redirect_keys_to_overlay,
     set_tab_being_dragged,
+    set_titlebar_tabs,
     set_window_being_dragged,
     start_drag_with_data,
     swap_tabs,
@@ -67,6 +67,11 @@ from .window_list import WindowList
 
 P = ParamSpec('P')
 T = TypeVar('T')
+
+
+def native_titlebar_tabs_supported() -> bool:
+    # X11 has no client side decorations, so there is no titlebar kitty can draw into.
+    return is_macos or is_wayland()
 
 
 def update_tab_bar_visibility(func: Callable[Concatenate['TabManager', P], T]) -> Callable[Concatenate['TabManager', P], T]:
@@ -1323,10 +1328,10 @@ class TabManager:  # {{{
 
     @property
     def use_native_titlebar_tabs(self) -> bool:
-        return is_macos and get_options().macos_titlebar_tabs
+        return native_titlebar_tabs_supported() and get_options().native_titlebar_tabs
 
     def update_native_titlebar_tabs(self) -> None:
-        if not is_macos:
+        if not native_titlebar_tabs_supported():
             return
         if self.use_native_titlebar_tabs:
             opts = get_options()
@@ -1341,10 +1346,10 @@ class TabManager:  # {{{
                     fg = t.inactive_fg if t.inactive_fg is not None else color_as_int(opts.inactive_tab_foreground)
                     bg = t.inactive_bg if t.inactive_bg is not None else color_as_int(opts.inactive_tab_background)
                 data.append((t.tab_id, t.title, t.is_active, t.needs_attention, fg, bg))
-            cocoa_set_titlebar_tabs(self.os_window_id, tuple(data))
+            set_titlebar_tabs(self.os_window_id, tuple(data))
             self.native_titlebar_tabs_shown = True
         elif self.native_titlebar_tabs_shown:
-            cocoa_set_titlebar_tabs(self.os_window_id, ())
+            set_titlebar_tabs(self.os_window_id, ())
             self.native_titlebar_tabs_shown = False
 
     def mark_tab_bar_dirty(self) -> None:
@@ -1748,8 +1753,12 @@ class TabManager:  # {{{
             with suppress(Exception):
                 idx_under_mouse = old_tab_ids.index(tab_id_under_mouse)
         if idx_under_mouse < 0:
-            start = self.tab_bar.window_geometry.top if self.tab_bar.is_vertical else self.tab_bar.window_geometry.left
-            idx_under_mouse = 0 if coordinate < start else len(old_tab_ids) - 1
+            if self.tab_bar.laid_out_once:
+                start = self.tab_bar.window_geometry.top if self.tab_bar.is_vertical else self.tab_bar.window_geometry.left
+                idx_under_mouse = 0 if coordinate < start else len(old_tab_ids) - 1
+            else:
+                # native titlebar tabs: the grid tab bar is never laid out
+                idx_under_mouse = len(old_tab_ids) - 1
         old_idx_under_mouse = old_tab_ids.index(tab_id)
         idx_moved_towards_start = old_idx_under_mouse > idx_under_mouse
         new_tab_ids = old_tab_ids

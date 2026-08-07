@@ -27,6 +27,7 @@ enum {
     BLIT_PROGRAM,
     SCREENSHOT_PROGRAM,
     ROUNDED_RECT_PROGRAM,
+    CORNER_MASK_PROGRAM,  // fork: rounded bottom corners for Wayland titlebar tabs
     NUM_PROGRAMS
 };
 enum { SPRITE_MAP_UNIT, GRAPHICS_UNIT, SPRITE_DECORATIONS_MAP_UNIT };
@@ -1667,6 +1668,64 @@ start_os_window_rendering(OSWindow *os_window, Tab *tab) {
     }
 }
 
+// Fork: rounded bottom corners for the Wayland native titlebar tabs mode.
+// Multiplies the framebuffer's premultiplied pixels by circle coverage in the
+// two bottom corners so the compositor shows the desktop through them. The
+// top corners are cut by the CSD titlebar buffer (glfw/wl_titlebar_tabs.c).
+static void
+draw_bottom_corner_masks(OSWindow *os_window) {
+    if (!os_window->wayland_titlebar_tabs_active) return;
+    double xdpi, ydpi; float xscale, yscale;
+    get_os_window_content_scale(os_window, &xdpi, &ydpi, &xscale, &yscale);
+    // radius must match WINDOW_TOP_CORNER_RADIUS in glfw/wl_titlebar_tabs.c
+    const GLsizei r = (GLsizei)(10.f * xscale + 0.5f);
+    const GLsizei w = os_window->viewport_width, h = os_window->viewport_height;
+    if (r <= 0 || w < 2 * r || h < r) return;
+    bind_program(CORNER_MASK_PROGRAM);
+    const GLint rect_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "rect");
+    const GLint border_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "border_color");
+    glUniform4f(border_loc, 0.f, 0.f, 0.f, 0.f);  // cut mode
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);  // dst *= coverage
+    // bottom-left corner; circle centers are in framebuffer coords (origin bottom-left)
+    glUniform4f(rect_loc, (float)r, (float)r, (float)r, 0.f);
+    save_viewport_using_top_left_origin(0, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // bottom-right corner
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, 0.f);
+    save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // macOS-style light inner window border, 1 logical px white@0.20 (the top
+    // edge and titlebar sides are drawn in the CSD buffer by wl_titlebar_tabs.c)
+    GLsizei bw = (GLsizei)(xscale + 0.5f);
+    if (bw < 1) bw = 1;
+    const float ba = 0.20f;
+    glUniform4f(border_loc, ba, ba, ba, ba);  // premultiplied white
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUniform4f(rect_loc, 0.f, 0.f, 0.f, (float)bw);  // solid mode
+    save_viewport_using_top_left_origin(0, 0, bw, h - r, h);  // left edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(w - bw, 0, bw, h - r, h);  // right edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(r, h - bw, w - 2 * r, bw, h);  // bottom edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // bottom corner arcs
+    glUniform4f(rect_loc, (float)r, (float)r, (float)r, (float)bw);
+    save_viewport_using_top_left_origin(0, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, (float)bw);
+    save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    glDisable(GL_BLEND);
+}
+
 static void
 stop_os_window_rendering(OSWindow *os_window, Tab *tab, Window *active_window) {
     if (OPT(cursor_trail) && tab->cursor_trail.needs_render) draw_cursor_trail(&tab->cursor_trail, active_window);
@@ -1689,6 +1748,7 @@ stop_os_window_rendering(OSWindow *os_window, Tab *tab, Window *active_window) {
             draw_resizing_text(os_window);
         }
     }
+    draw_bottom_corner_masks(os_window);
 }
 
 void
@@ -1900,6 +1960,7 @@ init_shaders(PyObject *module) {
     C(CELL_PROGRAM); C(CELL_FG_PROGRAM); C(CELL_BG_PROGRAM); C(BORDERS_PROGRAM);
     C(GRAPHICS_PROGRAM); C(GRAPHICS_PREMULT_PROGRAM); C(GRAPHICS_ALPHA_MASK_PROGRAM);
     C(BGIMAGE_PROGRAM); C(TINT_PROGRAM); C(TRAIL_PROGRAM); C(BLIT_PROGRAM); C(SCREENSHOT_PROGRAM); C(ROUNDED_RECT_PROGRAM);
+    C(CORNER_MASK_PROGRAM);
     C(GLSL_VERSION);
     C(GL_VERSION);
     C(GL_VENDOR);

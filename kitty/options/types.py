@@ -397,7 +397,6 @@ option_names = (
     'macos_show_window_title_in',
     'macos_thicken_font',
     'macos_titlebar_color',
-    'macos_titlebar_tabs',
     'macos_traditional_fullscreen',
     'macos_use_physical_screen_frame',
     'macos_window_resizable',
@@ -415,6 +414,7 @@ option_names = (
     'mouse_hide_wait',
     'mouse_map',
     'narrow_symbols',
+    'native_titlebar_tabs',
     'notify_on_cmd_finish',
     'open_url_with',
     'palette_generate',
@@ -616,7 +616,6 @@ class Options:
     macos_show_window_title_in: choices_for_macos_show_window_title_in = 'all'
     macos_thicken_font: float = 0
     macos_titlebar_color: int = 0
-    macos_titlebar_tabs: bool = False
     macos_traditional_fullscreen: bool = False
     macos_use_physical_screen_frame: bool = False
     macos_window_resizable: bool = True
@@ -629,6 +628,7 @@ class Options:
     mark3_foreground: Color = Color(0, 0, 0)
     momentum_scroll: float = 0.96
     mouse_hide_wait: MouseHideWait = MouseHideWait(hide_wait=0.0, show_wait=0.0, show_threshold=40, scroll_show=True) if is_macos else MouseHideWait(hide_wait=3.0, show_wait=0.0, show_threshold=40, scroll_show=True)
+    native_titlebar_tabs: bool = False
     notify_on_cmd_finish: NotifyOnCmdFinish = NotifyOnCmdFinish(when='never', duration=5.0, action='notify', cmdline=(), clear_on=('focus', 'next'))
     open_url_with: list[str] = ['default']
     palette_generate: choices_for_palette_generate = 'fixed'

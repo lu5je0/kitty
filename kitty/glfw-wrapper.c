@@ -449,6 +449,12 @@ load_glfw(const char* path) {
     *(void **) (&glfwGetRequiredInstanceExtensions_impl) = dlsym(handle, "glfwGetRequiredInstanceExtensions");
     if (glfwGetRequiredInstanceExtensions_impl == NULL) fail("Failed to load glfw function glfwGetRequiredInstanceExtensions with error: %s", dlerror());
 
+    *(void **) (&glfwSetTitlebarTabActionCallback_impl) = dlsym(handle, "glfwSetTitlebarTabActionCallback");
+    if (glfwSetTitlebarTabActionCallback_impl == NULL) fail("Failed to load glfw function glfwSetTitlebarTabActionCallback with error: %s", dlerror());
+
+    *(void **) (&glfwSetTitlebarTabTextCallback_impl) = dlsym(handle, "glfwSetTitlebarTabTextCallback");
+    if (glfwSetTitlebarTabTextCallback_impl == NULL) fail("Failed to load glfw function glfwSetTitlebarTabTextCallback with error: %s", dlerror());
+
     *(void **) (&glfwGetCocoaWindow_impl) = dlsym(handle, "glfwGetCocoaWindow");
     if (glfwGetCocoaWindow_impl == NULL) dlerror(); // clear error indicator
 
@@ -535,6 +541,9 @@ load_glfw(const char* path) {
 
     *(void **) (&glfwWaylandRedrawCSDWindowTitle_impl) = dlsym(handle, "glfwWaylandRedrawCSDWindowTitle");
     if (glfwWaylandRedrawCSDWindowTitle_impl == NULL) dlerror(); // clear error indicator
+
+    *(void **) (&glfwWaylandSetTitlebarTabs_impl) = dlsym(handle, "glfwWaylandSetTitlebarTabs");
+    if (glfwWaylandSetTitlebarTabs_impl == NULL) dlerror(); // clear error indicator
 
     *(void **) (&glfwWaylandIsWindowFullyCreated_impl) = dlsym(handle, "glfwWaylandIsWindowFullyCreated");
     if (glfwWaylandIsWindowFullyCreated_impl == NULL) dlerror(); // clear error indicator

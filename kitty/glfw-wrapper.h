@@ -1792,6 +1792,25 @@ typedef struct GLFWgamepadstate
     float axes[6];
 } GLFWgamepadstate;
 
+typedef struct GLFWTitlebarTab {
+    unsigned long long tab_id;
+    const char *title;
+    bool is_active, needs_attention;
+    uint32_t fg, bg;  // 0xRRGGBB
+} GLFWTitlebarTab;
+
+typedef enum GLFWTitlebarTabAction {
+    GLFW_TITLEBAR_TAB_ACTIVATE,
+    GLFW_TITLEBAR_TAB_CLOSE,
+    GLFW_TITLEBAR_TAB_NEW,
+    GLFW_TITLEBAR_TAB_DROP,
+    GLFW_TITLEBAR_TAB_DETACH,
+    GLFW_TITLEBAR_TAB_DRAG_OUT  // hand the drag over to a real DND session (cross-window)
+} GLFWTitlebarTabAction;
+
+typedef void (* GLFWtitlebartabactionfun)(GLFWwindow *window, GLFWTitlebarTabAction action, unsigned long long tab_id, int index);
+typedef bool (* GLFWtitlebartabtextfun)(GLFWwindow *window, const char *text, unsigned int sz_px, uint32_t fg, uint32_t bg, uint8_t *output_buf, size_t width, size_t height, float x_offset, float y_offset, size_t right_margin);
+
 
 /*************************************************************************
  * GLFW API functions
@@ -2416,6 +2435,14 @@ typedef const char** (*glfwGetRequiredInstanceExtensions_func)(uint32_t*);
 GFW_EXTERN glfwGetRequiredInstanceExtensions_func glfwGetRequiredInstanceExtensions_impl;
 #define glfwGetRequiredInstanceExtensions glfwGetRequiredInstanceExtensions_impl
 
+typedef GLFWtitlebartabactionfun (*glfwSetTitlebarTabActionCallback_func)(GLFWtitlebartabactionfun);
+GFW_EXTERN glfwSetTitlebarTabActionCallback_func glfwSetTitlebarTabActionCallback_impl;
+#define glfwSetTitlebarTabActionCallback glfwSetTitlebarTabActionCallback_impl
+
+typedef GLFWtitlebartabtextfun (*glfwSetTitlebarTabTextCallback_func)(GLFWtitlebartabtextfun);
+GFW_EXTERN glfwSetTitlebarTabTextCallback_func glfwSetTitlebarTabTextCallback_impl;
+#define glfwSetTitlebarTabTextCallback glfwSetTitlebarTabTextCallback_impl
+
 typedef void* (*glfwGetCocoaWindow_func)(GLFWwindow*);
 GFW_EXTERN glfwGetCocoaWindow_func glfwGetCocoaWindow_impl;
 #define glfwGetCocoaWindow glfwGetCocoaWindow_impl
@@ -2531,6 +2558,10 @@ GFW_EXTERN glfwWaylandSetInitialWindowSizeCallback_func glfwWaylandSetInitialWin
 typedef void (*glfwWaylandRedrawCSDWindowTitle_func)(GLFWwindow*);
 GFW_EXTERN glfwWaylandRedrawCSDWindowTitle_func glfwWaylandRedrawCSDWindowTitle_impl;
 #define glfwWaylandRedrawCSDWindowTitle glfwWaylandRedrawCSDWindowTitle_impl
+
+typedef void (*glfwWaylandSetTitlebarTabs_func)(GLFWwindow*, const GLFWTitlebarTab*, size_t, uint32_t, bool, int);
+GFW_EXTERN glfwWaylandSetTitlebarTabs_func glfwWaylandSetTitlebarTabs_impl;
+#define glfwWaylandSetTitlebarTabs glfwWaylandSetTitlebarTabs_impl
 
 typedef bool (*glfwWaylandIsWindowFullyCreated_func)(GLFWwindow*);
 GFW_EXTERN glfwWaylandIsWindowFullyCreated_func glfwWaylandIsWindowFullyCreated_impl;

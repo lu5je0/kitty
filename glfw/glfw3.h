@@ -2064,6 +2064,25 @@ typedef struct GLFWgamepadstate
     float axes[6];
 } GLFWgamepadstate;
 
+typedef struct GLFWTitlebarTab {
+    unsigned long long tab_id;
+    const char *title;
+    bool is_active, needs_attention;
+    uint32_t fg, bg;  // 0xRRGGBB
+} GLFWTitlebarTab;
+
+typedef enum GLFWTitlebarTabAction {
+    GLFW_TITLEBAR_TAB_ACTIVATE,
+    GLFW_TITLEBAR_TAB_CLOSE,
+    GLFW_TITLEBAR_TAB_NEW,
+    GLFW_TITLEBAR_TAB_DROP,
+    GLFW_TITLEBAR_TAB_DETACH,
+    GLFW_TITLEBAR_TAB_DRAG_OUT  // hand the drag over to a real DND session (cross-window)
+} GLFWTitlebarTabAction;
+
+typedef void (* GLFWtitlebartabactionfun)(GLFWwindow *window, GLFWTitlebarTabAction action, unsigned long long tab_id, int index);
+typedef bool (* GLFWtitlebartabtextfun)(GLFWwindow *window, const char *text, unsigned int sz_px, uint32_t fg, uint32_t bg, uint8_t *output_buf, size_t width, size_t height, float x_offset, float y_offset, size_t right_margin);
+
 
 /*************************************************************************
  * GLFW API functions
@@ -5904,6 +5923,9 @@ GLFWAPI int glfwGetPhysicalDevicePresentationSupport(VkInstance instance, VkPhys
 GLFWAPI VkResult glfwCreateWindowSurface(VkInstance instance, GLFWwindow* window, const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface);
 
 #endif /*VK_VERSION_1_0*/
+
+GLFWAPI GLFWtitlebartabactionfun glfwSetTitlebarTabActionCallback(GLFWtitlebartabactionfun callback);
+GLFWAPI GLFWtitlebartabtextfun glfwSetTitlebarTabTextCallback(GLFWtitlebartabtextfun callback);
 
 
 /*************************************************************************

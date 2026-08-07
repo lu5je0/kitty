@@ -1454,6 +1454,10 @@ class Boss:
             tm.new_tab()
 
     def titlebar_tab_drop(self, payload: str) -> None:
+        # the button was released in-bar: cancel any DND handoff still pending
+        # from titlebar_tab_drag_out, its implicit grab is gone (EPERM)
+        from .fast_data_types import set_tab_being_dragged
+        set_tab_being_dragged()
         try:
             src_os_window_id, tab_id, dst_os_window_id, idx = map(int, payload.split())
         except Exception:
@@ -1486,6 +1490,10 @@ class Boss:
             focus_os_window(dst_os_window_id, True)
 
     def titlebar_tab_detach(self, payload: str) -> None:
+        # release beat the async DND handoff (titlebar_tab_drag_out): cancel
+        # it, the implicit grab is gone and start_drag would fail with EPERM
+        from .fast_data_types import set_tab_being_dragged
+        set_tab_being_dragged()
         try:
             os_window_id, tab_id = map(int, payload.split()[:2])
         except Exception:
@@ -1496,6 +1504,17 @@ class Boss:
         tab = tm.tab_for_id(tab_id)
         if tab is not None:
             self._move_tab_to(tab=tab, target_os_window_id=None)
+
+    def titlebar_tab_drag_out(self, payload: str) -> None:
+        # a native titlebar tab was dragged out of the bar: hand the drag over
+        # to the upstream mime based DND session so it can be dropped onto
+        # other kitty windows (merge), released outside (detach) or cancelled
+        tm, tab = self._titlebar_tab_payload(payload)
+        if tm is None or tab is None:
+            return
+        from .fast_data_types import request_callback_with_thumbnail, set_tab_being_dragged
+        set_tab_being_dragged(tab.id, True, 0, 0)
+        request_callback_with_thumbnail('start_tab_drag', tm.os_window_id)
 
     def start_tab_drag(self, os_window_id: int, window_id: int, pixels: bytes, width: int, height: int) -> None:
         if tm := self.os_window_map.get(os_window_id):

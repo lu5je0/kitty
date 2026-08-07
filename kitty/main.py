@@ -174,7 +174,8 @@ def set_window_icon() -> None:
             else:
                 set_default_window_icon(custom_icon_path)
         else:
-            if is_x11:
+            if is_x11 or is_wayland():
+                # on Wayland the icon is also drawn in the native titlebar tab bar
                 set_default_window_icon(get_icon128_path(logo_png_file))
     except ValueError as err:
         log_error(err)

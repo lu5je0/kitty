@@ -13,18 +13,19 @@ from kitty.options.utils import (
     clone_source_strategies, config_or_absolute_path, confirm_close, copy_on_select,
     cursor_blink_interval, cursor_text_color, cursor_trail_decay, cursor_trail_start_threshold,
     deprecated_adjust_line_height, deprecated_hide_window_decorations_aliases,
-    deprecated_macos_show_window_title_in_menubar_alias, deprecated_scrollback_indicator_opacity,
-    deprecated_send_text, disable_ligatures, edge_width, env, filter_notification, font_features,
-    hide_window_decorations, macos_option_as_alt, macos_titlebar_color, menu_map, modify_font,
-    mouse_hide_wait, narrow_symbols, notify_on_cmd_finish, optional_edge_width, parse_font_spec,
-    parse_map, parse_mouse_map, paste_actions, pointer_shape_when_dragging, remote_control_password,
-    resize_debounce_time, scrollback_lines, scrollback_pager_history_size, scrollbar_color,
-    shell_integration, show_hyperlink_targets, store_multiple, symbol_map, tab_activity_symbol,
-    tab_bar_edge, tab_bar_margin_height, tab_bar_min_tabs, tab_fade, tab_font_style, tab_separator,
-    tab_title_template, tab_title_wrap, text_fg_override_threshold, titlebar_color, to_cursor_shape,
-    to_cursor_unfocused_shape, to_font_size, to_layout_names, to_modifiers,
-    transparent_background_colors, underline_exclusion, url_prefixes, url_style, visual_bell_duration,
-    visual_window_select_characters, window_border_width, window_logo_scale, window_size
+    deprecated_macos_show_window_title_in_menubar_alias, deprecated_macos_titlebar_tabs_alias,
+    deprecated_scrollback_indicator_opacity, deprecated_send_text, disable_ligatures, edge_width, env,
+    filter_notification, font_features, hide_window_decorations, macos_option_as_alt,
+    macos_titlebar_color, menu_map, modify_font, mouse_hide_wait, narrow_symbols, notify_on_cmd_finish,
+    optional_edge_width, parse_font_spec, parse_map, parse_mouse_map, paste_actions,
+    pointer_shape_when_dragging, remote_control_password, resize_debounce_time, scrollback_lines,
+    scrollback_pager_history_size, scrollbar_color, shell_integration, show_hyperlink_targets,
+    store_multiple, symbol_map, tab_activity_symbol, tab_bar_edge, tab_bar_margin_height,
+    tab_bar_min_tabs, tab_fade, tab_font_style, tab_separator, tab_title_template, tab_title_wrap,
+    text_fg_override_threshold, titlebar_color, to_cursor_shape, to_cursor_unfocused_shape,
+    to_font_size, to_layout_names, to_modifiers, transparent_background_colors, underline_exclusion,
+    url_prefixes, url_style, visual_bell_duration, visual_window_select_characters, window_border_width,
+    window_logo_scale, window_size
 )
 
 
@@ -1135,9 +1136,6 @@ class Parser:
     def macos_titlebar_color(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['macos_titlebar_color'] = macos_titlebar_color(val)
 
-    def macos_titlebar_tabs(self, val: str, ans: dict[str, typing.Any]) -> None:
-        ans['macos_titlebar_tabs'] = to_bool(val)
-
     def macos_traditional_fullscreen(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['macos_traditional_fullscreen'] = to_bool(val)
 
@@ -1185,6 +1183,9 @@ class Parser:
     def narrow_symbols(self, val: str, ans: dict[str, typing.Any]) -> None:
         for k, v in narrow_symbols(val):
             ans["narrow_symbols"][k] = v
+
+    def native_titlebar_tabs(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['native_titlebar_tabs'] = to_bool(val)
 
     def notify_on_cmd_finish(self, val: str, ans: dict[str, typing.Any]) -> None:
         ans['notify_on_cmd_finish'] = notify_on_cmd_finish(val)
@@ -1610,6 +1611,9 @@ class Parser:
 
     def scrollback_indicator_opacity(self, val: str, ans: dict[str, typing.Any]) -> None:
         deprecated_scrollback_indicator_opacity('scrollback_indicator_opacity', val, ans)
+
+    def macos_titlebar_tabs(self, val: str, ans: dict[str, typing.Any]) -> None:
+        deprecated_macos_titlebar_tabs_alias('macos_titlebar_tabs', val, ans)
 
     def map(self, val: str, ans: dict[str, typing.Any]) -> None:
         for k in parse_map(val):
