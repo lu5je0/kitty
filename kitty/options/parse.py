@@ -1226,6 +1226,12 @@ class Parser:
 
     choices_for_pointer_shape_when_grabbed = choices_for_default_pointer_shape
 
+    def preedit_background(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['preedit_background'] = to_color_or_none(val)
+
+    def preedit_foreground(self, val: str, ans: dict[str, typing.Any]) -> None:
+        ans['preedit_foreground'] = to_color_or_none(val)
+
     def progress_bar(self, val: str, ans: dict[str, typing.Any]) -> None:
         val = val.lower()
         if val not in self.choices_for_progress_bar:

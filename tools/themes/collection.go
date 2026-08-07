@@ -310,6 +310,8 @@ var AllColorSettingNames = map[string]bool{ // {{{
 	"mark2_foreground":                     true,
 	"mark3_background":                     true,
 	"mark3_foreground":                     true,
+	"preedit_background":                   true,
+	"preedit_foreground":                   true,
 	"scrollbar_handle_color":               true,
 	"scrollbar_track_color":                true,
 	"selection_background":                 true,

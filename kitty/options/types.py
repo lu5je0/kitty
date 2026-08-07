@@ -423,6 +423,8 @@ option_names = (
     'placement_strategy',
     'pointer_shape_when_dragging',
     'pointer_shape_when_grabbed',
+    'preedit_background',
+    'preedit_foreground',
     'progress_bar',
     'remember_window_position',
     'remember_window_size',
@@ -637,6 +639,8 @@ class Options:
     placement_strategy: choices_for_placement_strategy = 'center'
     pointer_shape_when_dragging: tuple[str, str] = ('beam', 'crosshair')
     pointer_shape_when_grabbed: choices_for_pointer_shape_when_grabbed = 'arrow'
+    preedit_background: kitty.fast_data_types.Color | None = None
+    preedit_foreground: kitty.fast_data_types.Color | None = None
     progress_bar: choices_for_progress_bar = 'top'
     remember_window_position: bool = False
     remember_window_size: bool = True
@@ -1173,6 +1177,8 @@ nullable_colors = frozenset({
     'tab_bar_margin_color',
     'selection_foreground',
     'selection_background',
+    'preedit_foreground',
+    'preedit_background',
     'color16',
     'color17',
     'color18',
@@ -1447,6 +1453,8 @@ all_colors = frozenset({
     'background',
     'selection_foreground',
     'selection_background',
+    'preedit_foreground',
+    'preedit_background',
     'color0',
     'color8',
     'color1',
