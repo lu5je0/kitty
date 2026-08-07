@@ -118,6 +118,7 @@ active_window(void) {
 void
 update_ime_focus(OSWindow *osw, bool focused) {
     if (!osw || !osw->handle) return;
+    fork_ime_sync_wayland_inhibit(osw);  // fork-local, must run before the FOCUS event below
     GLFWIMEUpdateEvent ev = { .focused = focused, .type = GLFW_IME_UPDATE_FOCUS };
     glfwUpdateIMEState(osw->handle, &ev);
 }
@@ -624,4 +625,19 @@ init_keys(PyObject *module) {
     Py_INCREF(&PyKeyEvent_Type);
     ADD_TYPE(SingleKey);
     return true;
+}
+
+// fork-local (see kitty/fork-ime.h and AGENTS.md): on Wayland the zwp_text_input_v3
+// object is per-seat and stateful, so kitty pushes the active window's
+// mDISABLE_IME flag to glfw whenever IME focus is about to be updated. The
+// wayland-only glfw symbol is NULL on other backends.
+void
+fork_ime_sync_wayland_inhibit(OSWindow *osw) {
+    if (!global_state.is_wayland || !glfwWaylandSetIMEInhibited) return;
+    // the text input follows keyboard focus, so only the focused OS window may set it
+    if (!osw || !osw->is_focused || !osw->num_tabs) return;
+    Tab *tab = osw->tabs + osw->active_tab;
+    if (!tab->num_windows) return;
+    Screen *screen = tab->windows[tab->active_window].render_data.screen;
+    glfwWaylandSetIMEInhibited(screen && screen->modes.mDISABLE_IME);
 }

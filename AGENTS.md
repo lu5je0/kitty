@@ -83,7 +83,7 @@
 
 ## 特性：按 window 彻底禁用输入法
 
-**是什么**：让终端里的程序按 kitty window（pane 粒度，不是 OS window）**彻底旁路 macOS 输入法**——IME 完全收不到按键，无法组词、无候选窗、无 preedit。不是切换到英文输入源，菜单栏输入法图标不变。
+**是什么**：让终端里的程序按 kitty window（pane 粒度，不是 OS window）**彻底旁路输入法**——IME 完全收不到按键，无法组词、无候选窗、无 preedit。不是切换到英文输入源，输入法指示图标不变。macOS 和 Wayland 都生效（机制不同，见下），X11 不做。
 
 **唯一通道：tui-bridge OSC 1337**
 
@@ -116,6 +116,14 @@ OSC 1337 ; SetUserVar=tui-bridge=<base64 of {"id":1,"module":"ime","method":"nor
 
 **纯声明式**：ObjC 侧每次按键实时读这个 flag，正确性不依赖任何状态转换钩子。`fork_ime_set_disabled()` 里的 `update_ime_position_for_window()` 调用纯属体验优化——只为丢弃"切换瞬间正在组的候选词"。
 
+### 机制（Wayland）
+
+macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input_v3 协议，**per-seat 全局对象、有状态**，组词时 compositor 根本不给客户端发 `wl_keyboard.key`，客户端唯一手段是 `zwp_text_input_v3_disable`。因此：
+
+- glfw 侧（`glfw/wl_text_input.c`）加一个模块级 `fork_ime_inhibited` 标志 + 导出 `glfwWaylandSetIMEInhibited(bool)`（走 glfw.py 硬编码清单 + wrapper 动态加载，非 Wayland 后端符号为 NULL 静默跳过）。上游有两处会 re-enable，都已拦截：`text_input_enter`（compositor enter 时无条件 enable，插了一行早退）和 `_glfwPlatformUpdateIMEState` 的 `GLFW_IME_UPDATE_FOCUS` case（顶部插一行走 `fork_ime_force_disable()`，该 helper 是新增函数，镜像上游 else 分支的清理逻辑）。切换标志时若 `ime_focused` 会立即 disable / 恢复 enable。
+- kitty 侧的同步点：`keys.c` 末尾新增 `fork_ime_sync_wayland_inhibit(OSWindow*)`（inhibit = 聚焦 OS window 的 active kitty window 的 `mDISABLE_IME`；非聚焦 OS window 不许推送，因为 text input 跟随键盘焦点）。它在两个 FOCUS 事件发送点**之前**被调：`update_ime_focus()` 开头 1 行、`kitty/glfw.c` `window_focus_callback` 里 1 行。OSC / Python setter / 窗口焦点切换全部汇聚到 `update_ime_focus`，所以 `fork-ime.h` 零改动即可生效。
+- RIS 兜底：`do_screen_reset` 清 modes 前插了 1 行 `fork_ime_set_disabled(self, false)`——macOS 靠 `modes = empty_modes` 就够，但 Wayland 的 inhibit 状态在 glfw 里，必须走通知路径推一次（函数自带去重，flag 没置时是 no-op）。
+
 ### 改动文件
 
 | 文件 | 改动内容 |
@@ -131,8 +139,15 @@ OSC 1337 ; SetUserVar=tui-bridge=<base64 of {"id":1,"module":"ime","method":"nor
 | `kitty/fast_data_types.pyi` | `Screen.ime_disabled: bool` 类型声明，追加在属性列表末尾 |
 | `kitty_tests/ime_mode.py` | 单元测试：两个 method、RIS 清除、**其它 user var 不被吞**、畸形 payload 被忽略、属性可写 |
 | `kitty_tests/ime_e2e.py` | 端到端：真起一个 nvim（用真实 `~/.dotfiles` 配置）在 pty 里跑，验证 startup / InsertEnter / InsertLeave / CmdlineEnter / CmdlineLeave 五个状态。没有 nvim 或 dotfiles 时自动 skip |
+| `glfw/wl_text_input.c` | Wayland 生效路径（**全部纯新增，零删改**）：static `fork_ime_inhibited`、`text_input_enter` 早退 1 行、FOCUS case 顶部拦截 1 行、新 helper `fork_ime_force_disable()`、文件末尾导出 `glfwWaylandSetIMEInhibited()`。冲突时全部保留 |
+| `glfw/glfw.py` | 硬编码清单加 `glfwWaylandSetIMEInhibited` 1 行 |
+| `kitty/keys.c` | `update_ime_focus()` 开头插 1 行 sync 调用；文件末尾追加 `fork_ime_sync_wayland_inhibit()` 实现 |
+| `kitty/state.h` | 文件末尾追加 `fork_ime_sync_wayland_inhibit` 声明 1 行 |
+| `kitty/glfw.c`（Wayland 部分） | `window_focus_callback` 里构造 FOCUS 事件前插 1 行 sync 调用 |
+| `kitty/screen.c`（Wayland 部分） | `do_screen_reset` 清 modes 前插 1 行 `fork_ime_set_disabled(self, false)` |
+| `kitty/glfw-wrapper.{h,c}` | 生成文件，`cd glfw && python3 glfw.py` 重新生成，勿手改 |
 
-整体 merge footprint：**52 行新增、3 行删除**（`kitty/glfw.c` 的安装行 + `glfw/cocoa_window.m` 的两行 `process_text` 计算）。`kitty/modes.h` 完全没动。
+整体 merge footprint（macOS 部分）：**52 行新增、3 行删除**（`kitty/glfw.c` 的安装行 + `glfw/cocoa_window.m` 的两行 `process_text` 计算）。Wayland 部分全部是纯新增行（约 45 行）。`kitty/modes.h` 完全没动。
 
 跑测试：`./test.py --module ime_mode` 和 `--module ime_e2e`。
 
@@ -150,7 +165,8 @@ map ctrl+b>i enable_ime
 
 ### 已知限制
 
-- **仅 macOS 生效**。Linux 下 flag 能置但无效果（X11/ibus 走 `glfw/ibus_glfw.c`、Wayland 走 `glfw/wl_text_input.c`，需另做）。
+- **macOS 和 Wayland 生效，X11 不做**（flag 能置但无效果；X11/ibus 走 `glfw/ibus_glfw.c`，需另做）。Wayland 上若设了 `GLFW_IM_MODULE=ibus`（强制走 ibus 而非 text-input-v3），同样不覆盖。
+- **Wayland 的 inhibit 是 per-seat 全局状态**，靠焦点事件链同步到"聚焦 OS window 的 active kitty window"。跨 OS window 切换时，同一事件批内理论上有一瞬间用的是旧值（compositor 的 text_input enter 和 keyboard enter 处理顺序不保证），实际无感。
 - `process_text == false` 时已带 `kUCKeyTranslateNoDeadKeysMask`，所以 **dead key / Option 组合键也一并禁用**——符合"彻底禁止"的预期。
 - **tmux/screen 会吞掉这个 OSC**，需开 `allow-passthrough`。也正因如此 nvim 侧用 `TERM == 'xterm-kitty'` 判断——tmux 里 TERM 被改写，会自动退回其它 backend。
 - **nvim 内置 terminal 里的程序管不了外层**。nvim 的终端模拟器不会把这个 OSC 转发给外层 kitty，所以在 `:terminal` 里跑的 zsh，它的 vi-mode 钩子对外层无效——那里的 IME 完全由外层 nvim 的 `TermEnter`/`TermLeave` 决定（即 terminal 模式下始终启用）。
@@ -180,6 +196,7 @@ map ctrl+b>i enable_ime
    - `kitty/options/parse.py`、`types.py` 等生成文件：任选一边解决后，用 `./kitty/launcher/kitty +launch gen config` 重新生成即可
    - `glfw/cocoa_window.m`：保持 `apply_window_corner_curve` 删除状态；`keyDown:`/`flagsChanged:` 里的 `filter_result` / `ime_disabled` 改动要保留（上游经常动这几行的 `process_text` 计算）
    - `kitty/vt-parser.c`：`case 1337:` 那行 `fork_ime_handle_osc1337(...)` 拦截要保留，且必须在 `START_DISPATCH` 之前
+   - `glfw/wl_text_input.c`：fork 的 4 处纯新增（`fork_ime_inhibited`、enter 早退行、FOCUS case 拦截行 + `fork_ime_force_disable()`、末尾 `glfwWaylandSetIMEInhibited()`）要保留；`kitty/keys.c` `update_ime_focus` 开头、`kitty/glfw.c` `window_focus_callback`、`kitty/screen.c` `do_screen_reset` 各 1 行 fork-local 调用要保留
    - 其余文件冲突按上表理解语义手动合
 3. `./dev.sh build` 重新构建（需 Go 工具链；国内网络建议挂代理 `export https_proxy=...`）
 4. `./test.py` 跑测试，尤其 `--module ime_mode` 和 `--module ime_e2e`

@@ -20,6 +20,9 @@ static char *pending_commit   = NULL;
 static bool ime_focused = false;
 static int last_cursor_left = 0, last_cursor_top = 0, last_cursor_width = 0, last_cursor_height = 0;
 uint32_t commit_serial = 0;
+// fork-local: when true the active kitty window has its IME hard-disabled, so
+// never send zwp_text_input_v3_enable. Set via glfwWaylandSetIMEInhibited below.
+static bool fork_ime_inhibited = false;
 
 static void commit(void) {
     if (text_input) {
@@ -33,6 +36,7 @@ text_input_enter(void *data UNUSED, struct zwp_text_input_v3 *txt_input, struct 
     debug("text-input: enter event\n");
     if (txt_input) {
         ime_focused = true;
+        if (fork_ime_inhibited) return;  // fork-local: stay disabled (post-enter default state)
         zwp_text_input_v3_enable(txt_input);
         zwp_text_input_v3_set_content_type(txt_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
 	if (last_cursor_width > 0) {
@@ -157,12 +161,27 @@ _glfwWaylandDestroyTextInput(void) {
     free(pending_commit); pending_commit = NULL;
 }
 
+// fork-local: discard any composition state and force the text input into the
+// disabled state, mirroring the GLFW_IME_UPDATE_FOCUS unfocused branch below.
+static void
+fork_ime_force_disable(void) {
+    free(pending_pre_edit); pending_pre_edit = NULL;
+    if (current_pre_edit) {
+        send_text(NULL, GLFW_IME_PREEDIT_CHANGED);
+        free(current_pre_edit); current_pre_edit = NULL;
+    }
+    if (pending_commit) { free(pending_commit); pending_commit = NULL; }
+    zwp_text_input_v3_disable(text_input);
+    commit();
+}
+
 void
 _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
     if (!text_input) return;
     switch(ev->type) {
         case GLFW_IME_UPDATE_FOCUS:
             debug("\ntext-input: updating IME focus state, ime_focused: %d ev->focused: %d\n", ime_focused, ev->focused);
+            if (fork_ime_inhibited && ime_focused) { fork_ime_force_disable(); break; }  // fork-local
             if (ime_focused) {
                 zwp_text_input_v3_enable(text_input);
                 zwp_text_input_v3_set_content_type(text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
@@ -196,5 +215,27 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
             }
         }
             break;
+    }
+}
+
+// fork-local: entry point for kitty's per-window IME disable feature (see
+// kitty/fork-ime.h). Kitty keeps this in sync with the mDISABLE_IME flag of the
+// active kitty window of the focused OS window.
+GLFWAPI void
+glfwWaylandSetIMEInhibited(bool inhibited) {
+    if (fork_ime_inhibited == inhibited) return;
+    fork_ime_inhibited = inhibited;
+    debug("text-input: fork ime inhibited: %d ime_focused: %d\n", inhibited, ime_focused);
+    if (!text_input || !ime_focused) return;
+    if (inhibited) {
+        fork_ime_force_disable();
+    } else {
+        // mirror text_input_enter
+        zwp_text_input_v3_enable(text_input);
+        zwp_text_input_v3_set_content_type(text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
+        if (last_cursor_width > 0) {
+            zwp_text_input_v3_set_cursor_rectangle(text_input, last_cursor_left, last_cursor_top, last_cursor_width, last_cursor_height);
+        }
+        commit();
     }
 }

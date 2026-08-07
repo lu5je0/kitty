@@ -205,6 +205,7 @@ do_screen_reset(Screen *self, bool is_hard_reset) {
         grman_clear(self->main_grman, false, self->cell_size);  // dont delete images in scrollback
         grman_clear(self->alt_grman, true, self->cell_size);
     }
+    fork_ime_set_disabled(self, false);  // fork-local: push IME re-enable to glfw before modes are zeroed
     self->modes = empty_modes;
     self->saved_modes = empty_modes;
     self->active_hyperlink_id = 0;

@@ -665,6 +665,7 @@ window_focus_callback(GLFWwindow *w, int focused) {
         WINDOW_CALLBACK(on_focus, "O", focused ? Py_True : Py_False);
         if (!osw || osw->id != wid) osw = os_window_for_id(wid);
         if (osw) {
+            fork_ime_sync_wayland_inhibit(osw);  // fork-local, must run before the FOCUS event below
             GLFWIMEUpdateEvent ev = { .type = GLFW_IME_UPDATE_FOCUS, .focused = focused };
             glfwUpdateIMEState(osw->handle, &ev);
             if (focused) {

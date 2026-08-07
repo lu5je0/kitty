@@ -545,6 +545,9 @@ load_glfw(const char* path) {
     *(void **) (&glfwWaylandSetTitlebarTabs_impl) = dlsym(handle, "glfwWaylandSetTitlebarTabs");
     if (glfwWaylandSetTitlebarTabs_impl == NULL) dlerror(); // clear error indicator
 
+    *(void **) (&glfwWaylandSetIMEInhibited_impl) = dlsym(handle, "glfwWaylandSetIMEInhibited");
+    if (glfwWaylandSetIMEInhibited_impl == NULL) dlerror(); // clear error indicator
+
     *(void **) (&glfwWaylandIsWindowFullyCreated_impl) = dlsym(handle, "glfwWaylandIsWindowFullyCreated");
     if (glfwWaylandIsWindowFullyCreated_impl == NULL) dlerror(); // clear error indicator
 

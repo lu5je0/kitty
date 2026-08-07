@@ -656,3 +656,5 @@ bool change_drag_image(int idx);
 int start_window_drag(Window *w, bool in_test_mode);
 int notify_drag_data_ready(id_type os_window_id, const char *mime_type, const char *data, size_t data_sz, int type);
 BackgroundImage* background_image_for_os_window(OSWindow *w);
+// fork-local, implemented in keys.c, see AGENTS.md
+void fork_ime_sync_wayland_inhibit(OSWindow *osw);
