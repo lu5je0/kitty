@@ -342,7 +342,7 @@ update_regions(_GLFWwindow* window) {
         wl_region_add(region, 0, 0, window->wl.width, window->wl.height);
         // fork: the GL renderer cuts rounded bottom corners (radius 10) when
         // titlebar tabs are shown; those pixels must not be marked opaque
-        if (wl_titlebar_tabs_active(window)) {
+        if (wl_titlebar_tabs_rounded(window)) {
             wl_region_subtract(region, 0, window->wl.height - 10, 10, 10);
             wl_region_subtract(region, window->wl.width - 10, window->wl.height - 10, 10, 10);
         }

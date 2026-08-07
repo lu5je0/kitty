@@ -330,6 +330,7 @@ def generate_wrappers(glfw_header: str) -> None:
     void glfwWaylandSetInitialWindowSizeCallback(GLFWwaylandinitialsizefun callback)
     void glfwWaylandRedrawCSDWindowTitle(GLFWwindow *handle)
     void glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size_t count, uint32_t bar_color, bool use_system_color, int forced_appearance)
+    bool glfwWaylandTitlebarTabsRounded(GLFWwindow *handle)
     void glfwWaylandSetIMEInhibited(bool inhibited)
     bool glfwWaylandIsWindowFullyCreated(GLFWwindow *handle)
     bool glfwWaylandBeep(GLFWwindow *handle)

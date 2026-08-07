@@ -79,19 +79,22 @@ tabs_debug_enabled(void) {
 #define BUTTON_CELL_WIDTH 28.
 #define BUTTON_CHEVRON_ARM 5.0
 #define BUTTON_CHEVRON_RISE 0.4  // vertical half-extent = arm * this
+#define BUTTON_DIAMOND_ARM 5.0   // maximize: rotated square, half-diagonal
 #define BUTTON_CROSS_ARM 4.5
 #define BUTTON_STROKE_WIDTH 1.3
 #define BUTTON_HOVER_STROKE_MULT 1.45
 #define DRAG_THRESHOLD 4.
 #define DETACH_MARGIN 40.
-// Chrome/Breeze-style drop shadow for tabs windows. Parameters fitted to a
-// measured KDE Breeze shadow profile (gaussian sigma ~21 logical px, shifted
-// ~10 px down, peak alpha ~0.79), scaled down slightly so the tile margin
-// stays a reasonable interactive resize-border size.
-#define SHADOW_MARGIN 32       // logical px, replaces the upstream 12
-#define SHADOW_SIGMA 18.
-#define SHADOW_OFFSET_Y 9.
-#define SHADOW_ALPHA 0.78
+// Chrome-style drop shadow for tabs windows: the Material Design elevation-16
+// pair Chrome uses for active Linux CSD frames (gfx::ShadowValue::
+// MakeMdShadowValues), i.e. CSS `0 16px 32px rgba(0,0,0,.24), 0 0 16px
+// rgba(0,0,0,.12)`. CSS blur = 2 * gaussian sigma.
+#define SHADOW_MARGIN 48       // logical px, replaces the upstream 12
+#define SHADOW_KEY_SIGMA 16.
+#define SHADOW_KEY_OFFSET_Y 16.
+#define SHADOW_KEY_ALPHA 0.24
+#define SHADOW_AMBIENT_SIGMA 8.
+#define SHADOW_AMBIENT_ALPHA 0.12
 #define SHADOW_EDGE_FADE 6.    // ramp to zero over the outermost px of the tile
 // All animations run for 0.18s with an ease-out curve, same as macOS
 #define ANIM_DURATION ms_to_monotonic_t(180ll)
@@ -363,7 +366,7 @@ wl_titlebar_tabs_destroy_corner_patches(_GLFWwindow *window) {
 }
 
 // The shadow surfaces double as resize handles: with the SHADOW_MARGIN-wide
-// soft shadow the grabbable border would be 32px, so clicks well outside the
+// soft shadow the grabbable border would be 48px, so clicks well outside the
 // window would start resizes instead of reaching the window behind (native
 // KDE shadows are not interactive). Restrict input to the innermost 12
 // logical px, the upstream border width.
@@ -409,6 +412,14 @@ bool
 wl_titlebar_tabs_active(_GLFWwindow *window) {
     WaylandTabBarState *s = state_for_window(window->id, false);
     return s && s->count > 0;
+}
+
+// Docked (maximized/fullscreen/tiled) windows get square corners and no light
+// inner border: they have no shadow either (window_needs_shadows()) and the
+// decorative frame would just cut holes into a window flush with the screen.
+bool
+wl_titlebar_tabs_rounded(_GLFWwindow *window) {
+    return wl_titlebar_tabs_active(window) && !(window->wl.current.toplevel_states & TOPLEVEL_STATE_DOCKED);
 }
 
 // True while a titlebar tab drag holds the pointer. Crossing between the
@@ -907,16 +918,20 @@ render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas
         canvas_blend_segment(bar, cx - a, cy + a, cx + a, cy - a, half_w, fg_rgb, 1.0);
         right = left;
     }
-    // maximize: wide flat chevron up (down when maximized)
+    // maximize: chevron up, diamond (rotated square) while maximized
     if (window->wl.wm_capabilities.maximize) {
         const int left = right - cell_w;
         const double cx = left + cell_w / 2.;
         decs.maximize.left = left; decs.maximize.width = cell_w;
-        const double a = BUTTON_CHEVRON_ARM * fscale, r = a * BUTTON_CHEVRON_RISE, half_w = stroke_for(maximize);
+        const double half_w = stroke_for(maximize);
         if (window->wl.current.toplevel_states & TOPLEVEL_STATE_MAXIMIZED) {
-            canvas_blend_segment(bar, cx - a, cy - r, cx, cy + r, half_w, fg_rgb, 1.0);
-            canvas_blend_segment(bar, cx, cy + r, cx + a, cy - r, half_w, fg_rgb, 1.0);
+            const double a = BUTTON_DIAMOND_ARM * fscale;
+            canvas_blend_segment(bar, cx, cy - a, cx + a, cy, half_w, fg_rgb, 1.0);
+            canvas_blend_segment(bar, cx + a, cy, cx, cy + a, half_w, fg_rgb, 1.0);
+            canvas_blend_segment(bar, cx, cy + a, cx - a, cy, half_w, fg_rgb, 1.0);
+            canvas_blend_segment(bar, cx - a, cy, cx, cy - a, half_w, fg_rgb, 1.0);
         } else {
+            const double a = BUTTON_CHEVRON_ARM * fscale, r = a * BUTTON_CHEVRON_RISE;
             canvas_blend_segment(bar, cx - a, cy + r, cx, cy - r, half_w, fg_rgb, 1.0);
             canvas_blend_segment(bar, cx, cy - r, cx + a, cy + r, half_w, fg_rgb, 1.0);
         }
@@ -936,35 +951,26 @@ render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas
     s->tabs_area_right = right - (int)round(TAB_SPACING * fscale);
 }
 
-// Replaces the freshly built shadow tile of a tabs window with a
-// Chrome/Breeze-style drop shadow: a real gaussian blur of the window's
-// rounded rectangle, shifted downwards, with parameters fitted to a measured
-// KDE Breeze shadow. The upstream tile (a tight 12px 0.7-alpha box blur with
-// square corners and no offset) reads as a dark outline next to native KDE
-// windows. Hooked from create_shadow_tile(); the tile layout (stride,
-// corner_size, repeating middle segments) is unchanged so the upstream
-// slicing in render_shadows() and the corner patches keep working.
-void
-wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
-    if (!wl_titlebar_tabs_active(window) || !decs.shadow_tile.data) return;
-    double fscale = decs.for_window_state.fscale;
-    if (fscale <= 0) fscale = 1.;
-    const ssize_t S = (ssize_t)decs.shadow_tile.stride;
-    const ssize_t m = (ssize_t)decs.shadow_tile.for_decoration_size;
-    const double sigma = SHADOW_SIGMA * fscale;
+// Replaces the freshly built shadow tile of a tabs window with the Chrome
+// Linux CSD drop shadow: the two Material Design elevation-16 gaussians
+// (offset key shadow + centered ambient shadow) blurred from the window's
+// rounded rectangle and composited source-over. The upstream tile (a tight
+// 12px 0.7-alpha box blur with square corners and no offset) reads as a dark
+// outline next to other windows. Hooked from create_shadow_tile(); the tile
+// layout (stride, corner_size, repeating middle segments) is unchanged so the
+// upstream slicing in render_shadows() and the corner patches keep working.
+
+// Fills mask with the window's rounded-rect coverage shifted down by off,
+// then gaussian-blurs it in place (separable, truncated at 2.5 sigma).
+static void
+blurred_rounded_rect(float *mask, float *scratch, float *kernel, ssize_t S, ssize_t m, double r, double off, double sigma) {
     const ssize_t radius = (ssize_t)ceil(2.5 * sigma);
-    float *bufs = malloc(sizeof(float) * (size_t)(2 * S * S + 2 * radius + 1));
-    if (!bufs) return;
-    float *mask = bufs, *scratch = bufs + S * S, *kernel = bufs + 2 * (size_t)S * S;
     double ksum = 0;
     for (ssize_t i = -radius; i <= radius; i++) {
         const double v = exp(-(double)(i * i) / (2 * sigma * sigma));
         kernel[i + radius] = (float)v; ksum += v;
     }
     for (ssize_t i = 0; i <= 2 * radius; i++) kernel[i] = (float)(kernel[i] / ksum);
-    // base: the window's rounded rect, shifted down by the shadow offset
-    const double r = WINDOW_TOP_CORNER_RADIUS * fscale;
-    const double off = SHADOW_OFFSET_Y * fscale;
     const double rect_size = (double)(S - 2 * m);
     for (ssize_t y = 0; y < S; y++)
         for (ssize_t x = 0; x < S; x++)
@@ -988,6 +994,22 @@ wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
             mask[y * S + x] = (float)a;
         }
     }
+}
+
+void
+wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window) || !decs.shadow_tile.data) return;
+    double fscale = decs.for_window_state.fscale;
+    if (fscale <= 0) fscale = 1.;
+    const ssize_t S = (ssize_t)decs.shadow_tile.stride;
+    const ssize_t m = (ssize_t)decs.shadow_tile.for_decoration_size;
+    const ssize_t max_radius = (ssize_t)ceil(2.5 * SHADOW_KEY_SIGMA * fscale);
+    float *bufs = malloc(sizeof(float) * (size_t)(3 * S * S + 2 * max_radius + 1));
+    if (!bufs) return;
+    float *key = bufs, *ambient = bufs + S * S, *scratch = bufs + 2 * (size_t)S * S, *kernel = bufs + 3 * (size_t)S * S;
+    const double r = WINDOW_TOP_CORNER_RADIUS * fscale;
+    blurred_rounded_rect(key, scratch, kernel, S, m, r, SHADOW_KEY_OFFSET_Y * fscale, SHADOW_KEY_SIGMA * fscale);
+    blurred_rounded_rect(ambient, scratch, kernel, S, m, r, 0., SHADOW_AMBIENT_SIGMA * fscale);
     // fade to zero at the tile boundary so the truncation is not a hard line
     const double fade = SHADOW_EDGE_FADE * fscale;
     for (ssize_t y = 0; y < S; y++) {
@@ -995,7 +1017,9 @@ wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window) {
             ssize_t d = x; if (y < d) d = y; if (S - 1 - x < d) d = S - 1 - x; if (S - 1 - y < d) d = S - 1 - y;
             double f = fade > 0 ? d / fade : 1;
             if (f > 1) f = 1;
-            const double a = mask[y * S + x] * SHADOW_ALPHA * f;
+            const double ka = key[y * S + x] * SHADOW_KEY_ALPHA;
+            const double aa = ambient[y * S + x] * SHADOW_AMBIENT_ALPHA;
+            const double a = (ka + aa * (1 - ka)) * f;
             decs.shadow_tile.data[y * S + x] = ((uint32_t)(a * 255 + 0.5)) << 24;
         }
     }
@@ -1101,8 +1125,10 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     render_plus_button(s, &bar, bar_bg & 0xffffff, fscale);
     // in-bar ghost on top; hidden while torn off (the subsurface ghost shows)
     if (dragged && !s->drag_out) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);
-    draw_titlebar_border(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, fscale);
-    round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
+    if (wl_titlebar_tabs_rounded(window)) {
+        draw_titlebar_border(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, fscale);
+        round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
+    }
     if (bar.px != (uint32_t*)output) memcpy(output, bar.px, bar_sz);
     s->layout_bar_width = bar.width;
     s->layout_fscale = fscale;
@@ -1578,7 +1604,7 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
         struct wl_region *region = wl_compositor_create_region(_glfw.wl.compositor);
         if (region) {
             wl_region_add(region, 0, 0, window->wl.width, window->wl.height);
-            if (s->count > 0) {
+            if (wl_titlebar_tabs_rounded(window)) {
                 wl_region_subtract(region, 0, window->wl.height - 10, 10, 10);
                 wl_region_subtract(region, window->wl.width - 10, window->wl.height - 10, 10, 10);
             }
@@ -1591,7 +1617,7 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // geometry calculations, so just updating them and forcing a rebuild is
     // enough.
     if (s->count > 0 && decs.metrics.visible_titlebar_height != TABS_TITLEBAR_HEIGHT) {
-        // wider shadow margin for the Chrome/Breeze-style drop shadow (the
+        // wider shadow margin for the Chrome-style drop shadow (the
         // interactive resize border stays 12px, see restrict_shadow_input_regions)
         decs.metrics.width = SHADOW_MARGIN;
         decs.metrics.horizontal = 2 * decs.metrics.width;
@@ -1609,4 +1635,12 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // cover the rounded-off corners with shadow continuations (also runs from
     // ensure_csd_resources on resize/scale/focus changes)
     wl_titlebar_tabs_update_corner_patches(window);
+}
+
+// kitty's GL renderer draws the bottom corner cutouts and the content area's
+// light inner border; it needs the same free-floating test the CSD titlebar
+// uses so both halves of the frame agree.
+GLFWAPI bool
+glfwWaylandTitlebarTabsRounded(GLFWwindow *handle) {
+    return handle ? wl_titlebar_tabs_rounded((_GLFWwindow*)handle) : false;
 }

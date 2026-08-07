@@ -12,6 +12,10 @@
 
 // True when this window has titlebar tabs to draw (tab list is non-empty)
 bool wl_titlebar_tabs_active(_GLFWwindow *window);
+// True when the decorative frame (rounded corners + light inner border) should
+// be drawn: tabs are active and the window is free-floating. Docked
+// (maximized/fullscreen/tiled) windows are square and borderless.
+bool wl_titlebar_tabs_rounded(_GLFWwindow *window);
 // True while a titlebar tab drag holds the pointer (the implicit grab is
 // alive even if pointer_button_count was zeroed by a same-client leave)
 bool wl_titlebar_tabs_any_drag_active(void);
@@ -32,7 +36,8 @@ void wl_titlebar_tabs_free(_GLFWwindow *window);
 // ensure_csd_resources; destroy from free_csd_surfaces.
 void wl_titlebar_tabs_update_corner_patches(_GLFWwindow *window);
 void wl_titlebar_tabs_destroy_corner_patches(_GLFWwindow *window);
-// Overwrites the shadow tile of a tabs window with a Chrome/Breeze-style
-// drop shadow (gaussian, offset down, rounded-rect base). Called at the end
+// Overwrites the shadow tile of a tabs window with the Chrome-style drop
+// shadow (MD elevation-16 key+ambient gaussians, rounded-rect base). Called
+// at the end
 // of create_shadow_tile(); a no-op for windows without titlebar tabs.
 void wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window);

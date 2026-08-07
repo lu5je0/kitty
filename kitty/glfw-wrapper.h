@@ -2563,6 +2563,10 @@ typedef void (*glfwWaylandSetTitlebarTabs_func)(GLFWwindow*, const GLFWTitlebarT
 GFW_EXTERN glfwWaylandSetTitlebarTabs_func glfwWaylandSetTitlebarTabs_impl;
 #define glfwWaylandSetTitlebarTabs glfwWaylandSetTitlebarTabs_impl
 
+typedef bool (*glfwWaylandTitlebarTabsRounded_func)(GLFWwindow*);
+GFW_EXTERN glfwWaylandTitlebarTabsRounded_func glfwWaylandTitlebarTabsRounded_impl;
+#define glfwWaylandTitlebarTabsRounded glfwWaylandTitlebarTabsRounded_impl
+
 typedef void (*glfwWaylandSetIMEInhibited_func)(bool);
 GFW_EXTERN glfwWaylandSetIMEInhibited_func glfwWaylandSetIMEInhibited_impl;
 #define glfwWaylandSetIMEInhibited glfwWaylandSetIMEInhibited_impl

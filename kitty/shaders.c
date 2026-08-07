@@ -16,6 +16,7 @@
 #include "srgb_gamma.h"
 #include "uniforms_generated.h"
 #include "state.h"
+#include "glfw-wrapper.h"
 
 enum {
     CELL_PROGRAM, CELL_FG_PROGRAM, CELL_BG_PROGRAM, CELL_PROGRAM_SENTINEL,
@@ -1675,6 +1676,9 @@ start_os_window_rendering(OSWindow *os_window, Tab *tab) {
 static void
 draw_bottom_corner_masks(OSWindow *os_window) {
     if (!os_window->wayland_titlebar_tabs_active) return;
+    // docked (maximized/tiled/fullscreen) windows are square and borderless,
+    // same as the CSD titlebar half of the frame
+    if (glfwWaylandTitlebarTabsRounded && !glfwWaylandTitlebarTabsRounded(os_window->handle)) return;
     double xdpi, ydpi; float xscale, yscale;
     get_os_window_content_scale(os_window, &xdpi, &ydpi, &xscale, &yscale);
     // radius must match WINDOW_TOP_CORNER_RADIUS in glfw/wl_titlebar_tabs.c
