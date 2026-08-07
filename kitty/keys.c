@@ -134,6 +134,10 @@ prepare_ime_position_update_event(OSWindow *osw, Window *w, Screen *screen, GLFW
         left += screen->cursor->x * cell_width;
         top += screen->cursor->y * cell_height;
     }
+    // fork-local (see AGENTS.md): anchor the IME popup at the first pre-edit cell
+    // on Wayland instead of the moving pre-edit caret, so it does not jump per keystroke.
+    if (global_state.is_wayland && screen_is_overlay_active(screen))
+        left = w->render_data.geometry.left + screen->overlay_line.xstart * cell_width;
     ev->cursor.left = left; ev->cursor.top = top; ev->cursor.width = cell_width; ev->cursor.height = cell_height;
 }
 
