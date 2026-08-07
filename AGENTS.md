@@ -123,7 +123,7 @@ macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input
 - glfw 侧（`glfw/wl_text_input.c`）加一个模块级 `fork_ime_inhibited` 标志 + 导出 `glfwWaylandSetIMEInhibited(bool)`（走 glfw.py 硬编码清单 + wrapper 动态加载，非 Wayland 后端符号为 NULL 静默跳过）。上游有两处会 re-enable，都已拦截：`text_input_enter`（compositor enter 时无条件 enable，插了一行早退）和 `_glfwPlatformUpdateIMEState` 的 `GLFW_IME_UPDATE_FOCUS` case（顶部插一行走 `fork_ime_force_disable()`，该 helper 是新增函数，镜像上游 else 分支的清理逻辑）。切换标志时若 `ime_focused` 会立即 disable / 恢复 enable。
 - kitty 侧的同步点：`keys.c` 末尾新增 `fork_ime_sync_wayland_inhibit(OSWindow*)`（inhibit = 聚焦 OS window 的 active kitty window 的 `mDISABLE_IME`；非聚焦 OS window 不许推送，因为 text input 跟随键盘焦点）。它在两个 FOCUS 事件发送点**之前**被调：`update_ime_focus()` 开头 1 行、`kitty/glfw.c` `window_focus_callback` 里 1 行。OSC / Python setter / 窗口焦点切换全部汇聚到 `update_ime_focus`，所以 `fork-ime.h` 零改动即可生效。
 - RIS 兜底：`do_screen_reset` 清 modes 前插了 1 行 `fork_ime_set_disabled(self, false)`——macOS 靠 `modes = empty_modes` 就够，但 Wayland 的 inhibit 状态在 glfw 里，必须走通知路径推一次（函数自带去重，flag 没置时是 no-op）。
-- 候选框锚定：`prepare_ime_position_update_event`（keys.c）末尾插了 3 行 fork-local 覆盖——Wayland 组词时上报 `overlay_line.xstart`（preedit 第一个格子）而不是上游的 `cursor_x`（preedit 内部光标），否则每打一个字候选框跳一格。
+- 候选框锚定：`prepare_ime_position_update_event`（keys.c）末尾插了几行 fork-local 覆盖——Wayland 组词时上报 `overlay_line.xstart`（preedit 第一个格子）而不是上游的 `cursor_x`（preedit 内部光标），否则每打一个字候选框跳一格；同时 `top` 下移 1/4 个 cell，避免候选框贴住 preedit 行。
 
 ### 改动文件
 
