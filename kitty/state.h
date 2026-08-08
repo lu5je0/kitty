@@ -658,3 +658,4 @@ int notify_drag_data_ready(id_type os_window_id, const char *mime_type, const ch
 BackgroundImage* background_image_for_os_window(OSWindow *w);
 // fork-local, implemented in keys.c, see AGENTS.md
 void fork_ime_sync_wayland_inhibit(OSWindow *osw);
+void fork_ime_report_render_cursor(OSWindow *osw, Window *w);

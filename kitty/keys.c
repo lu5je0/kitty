@@ -136,9 +136,11 @@ prepare_ime_position_update_event(OSWindow *osw, Window *w, Screen *screen, GLFW
     }
     // fork-local (see AGENTS.md): anchor the IME popup at the first pre-edit cell
     // on Wayland instead of the moving pre-edit caret, so it does not jump per keystroke;
-    // shift it down a quarter cell so it does not overlap the pre-edit line.
-    if (global_state.is_wayland && screen_is_overlay_active(screen)) {
-        left = w->render_data.geometry.left + screen->overlay_line.xstart * cell_width;
+    // shift it down a quarter cell so it does not overlap the pre-edit line. The shift
+    // applies also outside composition so the pre-composition rect (pushed per-frame by
+    // fork_ime_report_render_cursor) matches and the popup does not move when preedit starts.
+    if (global_state.is_wayland) {
+        if (screen_is_overlay_active(screen)) left = w->render_data.geometry.left + screen->overlay_line.xstart * cell_width;
         top += cell_height / 4;
     }
     ev->cursor.left = left; ev->cursor.top = top; ev->cursor.width = cell_width; ev->cursor.height = cell_height;
@@ -647,4 +649,18 @@ fork_ime_sync_wayland_inhibit(OSWindow *osw) {
     if (!tab->num_windows) return;
     Screen *screen = tab->windows[tab->active_window].render_data.screen;
     glfwWaylandSetIMEInhibited(screen && screen->modes.mDISABLE_IME);
+}
+
+// fork-local (see AGENTS.md): on Wayland the compositor positions the IME
+// candidate popup using the last committed cursor rectangle. Upstream only
+// pushes it on key input (before the child echoes and moves the cursor) or
+// once composition has already started, so the popup first appears at the
+// previous composition's position and then jumps. Push it from the render
+// loop instead; wl_text_input.c dedupes, so unchanged rects cost nothing.
+void
+fork_ime_report_render_cursor(OSWindow *osw, Window *w) {
+    if (!global_state.is_wayland || !osw->is_focused || !osw->handle || !w->render_data.screen) return;
+    GLFWIMEUpdateEvent ev = { .type = GLFW_IME_UPDATE_CURSOR_POSITION };
+    prepare_ime_position_update_event(osw, w, w->render_data.screen, &ev);
+    glfwUpdateIMEState(osw->handle, &ev);
 }
