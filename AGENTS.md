@@ -44,11 +44,11 @@
 | `kitty/glfw.c` | Python API `set_titlebar_tabs`（`NativeTabInfo` 宏共享 macOS/Wayland 解析循环）+ 注册到 module_methods；`titlebar_tab_text_callback` / `titlebar_tab_action_callback`（非 Apple 分支，在 `glfw_init` 里和 `glfwSetDrawTextFunction` 一起注册）；Wayland 分支透传 `forced_appearance`（`macos_titlebar_color` light/dark）并置 `w->wayland_titlebar_tabs_active`（底部圆角开关） |
 | `kitty/child-monitor.c` | `process_cocoa_pending_actions` 中五个新 action 的 `call_boss` 转发 |
 | `kitty/boss.py` | `titlebar_tab_activate/close/new/drop/detach/drag_out` handler；drop/detach 开头 `set_tab_being_dragged()` 取消挂起的 DND handoff（松键快于异步缩略图回调时，implicit grab 已失效，晚到的 start_drag 会 EPERM） |
-| `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`、`tab_bar_hidden` 计算、`apply_options` 配置重载支持；**改了上游 `on_tab_drop_move` 3 行**：`window_geometry` 访问前加 `laid_out_once` 判断（native tabs 下网格 tab bar 从不 layout，否则跨窗口拖拽 AttributeError），合并冲突时保留该 guard |
+| `kitty/tabs.py` | `native_titlebar_tabs_supported()`（`is_macos or is_wayland()`）、`use_native_titlebar_tabs` 属性、`update_native_titlebar_tabs()`（带 `last_native_titlebar_tabs_data` 去重缓存：一次切 tab 会触发 2–3 次 `mark_tab_bar_dirty`，相同数据不重推原生层；`apply_options` 里清缓存强制重推，因为 bar 颜色/appearance 是 C 侧推送时才读 options）、`tab_bar_hidden` 计算、`apply_options` 配置重载支持；**改了上游 `on_tab_drop_move` 3 行**：`window_geometry` 访问前加 `laid_out_once` 判断（native tabs 下网格 tab bar 从不 layout，否则跨窗口拖拽 AttributeError），合并冲突时保留该 guard |
 | `kitty/fast_data_types.pyi` | `set_titlebar_tabs` 类型声明 |
 | `setup.py` | 链接 `-framework QuartzCore`（Core Animation 需要）；Info.plist 加 `UIDesignRequiresCompatibility`（见下） |
 | `glfw/wl_titlebar_tabs.{c,h}` | **Wayland 核心实现，纯 fork 专属文件，零冲突**：按 `window->id` 的模块内状态链表、macOS 同款布局算法、4×4 子采样抗锯齿绘制、命中测试与点击语义、`glfwWaylandSetTitlebarTabs` 导出（按 tab_id diff 保动画状态；强制 CSD、`visible_titlebar_height` 提到 33、立即重设 opaque region）。动画引擎：5 种 0.18s ease-out（位置/宽度、淡入/淡出、hover、变 active 配色）、文字 alpha 蒙版缓存、16ms 单例 timer + 动画期间 `wl_subsurface_set_desync`；非自定义色时用实测 macOS 标题栏色（深色聚焦 #393A39），`forced_appearance` 尊重 `macos_titlebar_color light/dark` |
-| `glfw/wl_client_side_decorations.c` | 仅加钩子：include 1 行、`render_title_bar()` 5 行（画 tab 后 `goto render_buttons`）、`update_hovered_button()` 1 行、`handle_pointer_button()` 1 行、`handle_pointer_leave()` 1 行、`csd_free_all_resources()` 1 行 |
+| `glfw/wl_client_side_decorations.c` | 仅加钩子：include 1 行、`render_title_bar()` 5 行、`update_hovered_button()` 1 行、`handle_pointer_button()` 1 行、`handle_pointer_leave()` 1 行、`csd_free_all_resources()` 1 行、`buffer_release_event()` 2 行（tabs 激活时不销毁被 release 的 buffer——上游 release 即销毁并置 `buffer_destroyed`，配合 16ms 动画会导致"每帧全量重建全部 CSD buffer"：销毁正在显示的 buffer 造成点击 tab 闪烁 + 明显卡顿。保留逻辑在 `wl_titlebar_tabs_retain_released_buffer()`，它会把 `*_needs_to_be_destroyed` 收回为 true 以免泄漏） |
 | `glfw/wl_window.c` | `update_regions()` 里 4 行：tabs 激活时 opaque region 挖掉底部两个 10×10 逻辑 px 角（配合 GL 圆角）；include 1 行 |
 | `kitty/shaders.c` | 枚举加 `CORNER_MASK_PROGRAM`、`C()` 导出 1 行、新 static `draw_bottom_corner_masks()`（帧末把底部两角像素乘以圆覆盖率，`GL_ZERO/GL_SRC_ALPHA`；同函数里还画内容区的 1px 浅色内描边：左右/底边 + 底角弧）+ `stop_os_window_rendering()` 末尾 1 行调用 |
 | `kitty/corner_mask_fragment.glsl` | **新文件，纯 fork 专属**：circle SDF coverage + `border_color` 描边模式，复用 `rounded_rect_vertex.glsl` |
@@ -76,9 +76,10 @@
 - **1px 浅色窗口内描边**（macos.png 实测：顶边 white@0.30、侧/底 white@0.20）：标题栏部分（顶边+顶角弧+侧列）由 `wl_titlebar_tabs.c` 的 `draw_titlebar_border()` 画进 CSD buffer（在 `round_top_corners` 之前）；内容区左右/底边+底角弧由 `kitty/shaders.c` 的 `draw_bottom_corner_masks()` 里的描边 pass 画（`corner_mask_fragment.glsl` 新增 `border_color` uniform：a==0 走原裁切模式，a>0 走描边/实心模式，`GL_ONE/GL_ONE_MINUS_SRC_ALPHA`）。
 - 左侧不画窗口 icon（曾画过，已移除，`_glfwPlatformSetWindowIcon` 的钩子行也删了）；tab 从 `TAB_BAR_LEFT_MARGIN`（8×7/6 逻辑 px，左侧没有红绿灯按钮所以比 macOS 的 16 小）开始。
 - mutter 默认 SSD：`glfwWaylandSetTitlebarTabs` 里检测 `decs.serverSide` 时强制切 CLIENT_SIDE（照抄 `setXdgDecorations` 的 titlebar_hidden 分支）。
+- **mutter 焦点重绘时序 bug**（现象：非拖动时阴影是未聚焦的半透明、tab 是灰色未聚焦配色）：CSD 的焦点相关绘制读 `_glfw.focusedWindowId`（键盘焦点），但上游重绘只由 xdg configure(activated) 触发；mutter 先发 configure 再发 `wl_keyboard.enter`，重绘时键盘焦点还没更新，之后也没人再触发。修法：`glfw/wl_init.c` 的 `keyboardHandleEnter/Leave` 里 `_glfwInputWindowFocus` 之后各插 1 行 `csd_change_title(window)`（内部按 focus_changed 去重；sync 的阴影 subsurface 靠焦点变化本身引发的下一次父 surface 提交生效）。合并冲突时这两行要保留。
 - 所有 tab 几何都存 **scaled px**（`round(fscale*x)` 命中），分数缩放下勿混逻辑坐标。
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。
-- 合并主干时 `glfw/wl_client_side_decorations.c` 的 6 处单行钩子要保留；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。
+- 合并主干时 `glfw/wl_client_side_decorations.c` 的 7 处钩子要保留（6 处单行 + `buffer_release_event()` 开头 2 行的 buffer 保留早退）；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。
 - 动画已实现（同 macOS：0.18s ease-out ×5 种；见 wl_titlebar_tabs.c 的 Anim 引擎）。跨窗口拖拽（Stage 4，上游 mime 方案）尚未实现，见 todo.md。
 
 ## 特性：按 window 彻底禁用输入法
@@ -123,7 +124,8 @@ macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input
 - glfw 侧（`glfw/wl_text_input.c`）加一个模块级 `fork_ime_inhibited` 标志 + 导出 `glfwWaylandSetIMEInhibited(bool)`（走 glfw.py 硬编码清单 + wrapper 动态加载，非 Wayland 后端符号为 NULL 静默跳过）。上游有两处会 re-enable，都已拦截：`text_input_enter`（compositor enter 时无条件 enable，插了一行早退）和 `_glfwPlatformUpdateIMEState` 的 `GLFW_IME_UPDATE_FOCUS` case（顶部插一行走 `fork_ime_force_disable()`，该 helper 是新增函数，镜像上游 else 分支的清理逻辑）。切换标志时若 `ime_focused` 会立即 disable / 恢复 enable。
 - kitty 侧的同步点：`keys.c` 末尾新增 `fork_ime_sync_wayland_inhibit(OSWindow*)`（inhibit = 聚焦 OS window 的 active kitty window 的 `mDISABLE_IME`；非聚焦 OS window 不许推送，因为 text input 跟随键盘焦点）。它在两个 FOCUS 事件发送点**之前**被调：`update_ime_focus()` 开头 1 行、`kitty/glfw.c` `window_focus_callback` 里 1 行。OSC / Python setter / 窗口焦点切换全部汇聚到 `update_ime_focus`，所以 `fork-ime.h` 零改动即可生效。
 - RIS 兜底：`do_screen_reset` 清 modes 前插了 1 行 `fork_ime_set_disabled(self, false)`——macOS 靠 `modes = empty_modes` 就够，但 Wayland 的 inhibit 状态在 glfw 里，必须走通知路径推一次（函数自带去重，flag 没置时是 no-op）。
-- 候选框锚定：`prepare_ime_position_update_event`（keys.c）末尾插了几行 fork-local 覆盖——Wayland 组词时上报 `overlay_line.xstart`（preedit 第一个格子）而不是上游的 `cursor_x`（preedit 内部光标），否则每打一个字候选框跳一格；同时 `top` 下移 1/4 个 cell，避免候选框贴住 preedit 行。
+- 候选框锚定：`prepare_ime_position_update_event`（keys.c）末尾插了几行 fork-local 覆盖——Wayland 组词时上报 `overlay_line.xstart`（preedit 第一个格子）而不是上游的 `cursor_x`（preedit 内部光标），否则每打一个字候选框跳一格；同时 `top` 下移 1/4 个 cell，避免候选框贴住 preedit 行。注意这个 1/4 cell 下移在 Wayland 下**无条件**生效（不只 overlay 激活时），否则组词前每帧上报的矩形和组词中的差 1/4 cell，候选框出现后会往下挪一下。
+- 候选框首现位置（GNOME 上"先出现在上次打字的位置再跳过来"的 bug）：上游只在按键到达（子进程回显**之前**）或组词已开始后才推 `set_cursor_rectangle`，commit 后子进程异步回显、光标前移时**没有任何路径**推送新矩形，所以下次组词 compositor 手里还是旧矩形。修法：`keys.c` 末尾新增 `fork_ime_report_render_cursor()`，在 `child-monitor.c` `prepare_to_render_os_window()` 的 active window 分支插 1 行，每帧对聚焦窗口上报光标矩形；glfw 侧 `wl_text_input.c` 本来就按矩形去重（不变不 commit），零额外状态，也不会触发 GNOME done 事件循环（#5105）。
 
 ### 改动文件
 
@@ -142,8 +144,9 @@ macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input
 | `kitty_tests/ime_e2e.py` | 端到端：真起一个 nvim（用真实 `~/.dotfiles` 配置）在 pty 里跑，验证 startup / InsertEnter / InsertLeave / CmdlineEnter / CmdlineLeave 五个状态。没有 nvim 或 dotfiles 时自动 skip |
 | `glfw/wl_text_input.c` | Wayland 生效路径（**全部纯新增，零删改**）：static `fork_ime_inhibited`、`text_input_enter` 早退 1 行、FOCUS case 顶部拦截 1 行、新 helper `fork_ime_force_disable()`、文件末尾导出 `glfwWaylandSetIMEInhibited()`。冲突时全部保留 |
 | `glfw/glfw.py` | 硬编码清单加 `glfwWaylandSetIMEInhibited` 1 行 |
-| `kitty/keys.c` | `update_ime_focus()` 开头插 1 行 sync 调用；文件末尾追加 `fork_ime_sync_wayland_inhibit()` 实现；`prepare_ime_position_update_event()` 末尾插 3 行（Wayland 候选框锚定 preedit 起点） |
-| `kitty/state.h` | 文件末尾追加 `fork_ime_sync_wayland_inhibit` 声明 1 行 |
+| `kitty/keys.c` | `update_ime_focus()` 开头插 1 行 sync 调用；文件末尾追加 `fork_ime_sync_wayland_inhibit()` 和 `fork_ime_report_render_cursor()` 实现；`prepare_ime_position_update_event()` 末尾插 3 行（Wayland 候选框锚定 preedit 起点） |
+| `kitty/state.h` | 文件末尾追加 `fork_ime_sync_wayland_inhibit`、`fork_ime_report_render_cursor` 声明 2 行 |
+| `kitty/child-monitor.c`（Wayland 部分） | `prepare_to_render_os_window()` active window 分支插 1 行 `fork_ime_report_render_cursor()`（每帧上报光标矩形，修 GNOME 候选框首现在旧位置的 bug） |
 | `kitty/glfw.c`（Wayland 部分） | `window_focus_callback` 里构造 FOCUS 事件前插 1 行 sync 调用 |
 | `kitty/screen.c`（Wayland 部分） | `do_screen_reset` 清 modes 前插 1 行 `fork_ime_set_disabled(self, false)` |
 | `kitty/glfw-wrapper.{h,c}` | 生成文件，`cd glfw && python3 glfw.py` 重新生成，勿手改 |

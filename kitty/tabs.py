@@ -1205,6 +1205,7 @@ class TabManager:  # {{{
         self.wm_name = wm_name
         self.args = args
         self.native_titlebar_tabs_shown = False
+        self.last_native_titlebar_tabs_data: tuple[tuple[int, str, bool, bool, int, int], ...] | None = None
         self.tab_bar_hidden = get_options().tab_bar_style == 'hidden' or self.use_native_titlebar_tabs
         self.tabs: list[Tab] = []
         self.active_tab_history: Deque[int] = deque()
@@ -1346,10 +1347,18 @@ class TabManager:  # {{{
                     fg = t.inactive_fg if t.inactive_fg is not None else color_as_int(opts.inactive_tab_foreground)
                     bg = t.inactive_bg if t.inactive_bg is not None else color_as_int(opts.inactive_tab_background)
                 data.append((t.tab_id, t.title, t.is_active, t.needs_attention, fg, bg))
-            set_titlebar_tabs(self.os_window_id, tuple(data))
+            payload = tuple(data)
+            # a single tab switch fires mark_tab_bar_dirty() several times
+            # (active tab, active window, title sync); pushing identical data
+            # to the native layer redraws the whole bar each time
+            if payload == self.last_native_titlebar_tabs_data:
+                return
+            set_titlebar_tabs(self.os_window_id, payload)
+            self.last_native_titlebar_tabs_data = payload
             self.native_titlebar_tabs_shown = True
         elif self.native_titlebar_tabs_shown:
             set_titlebar_tabs(self.os_window_id, ())
+            self.last_native_titlebar_tabs_data = None
             self.native_titlebar_tabs_shown = False
 
     def mark_tab_bar_dirty(self) -> None:
@@ -2168,6 +2177,9 @@ class TabManager:  # {{{
         self.tab_bar_hidden = get_options().tab_bar_style == 'hidden' or self.use_native_titlebar_tabs
         self.tab_bar.apply_options()
         self.update_tab_bar_data()
+        # bar color / forced appearance are read from options at push time in
+        # the C layer, so a config reload must bypass the dedup cache
+        self.last_native_titlebar_tabs_data = None
         self.update_native_titlebar_tabs()
         self.layout_tab_bar()
 # }}}

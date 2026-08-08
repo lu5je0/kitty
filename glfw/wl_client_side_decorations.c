@@ -151,6 +151,8 @@ window_has_buffer(_GLFWwindow *window, struct wl_buffer *q) {
 
 static void
 buffer_release_event(void *data, struct wl_buffer *buffer) {
+    _GLFWwindow *w = _glfwWindowForId((uintptr_t)data);
+    if (w && wl_titlebar_tabs_retain_released_buffer(w, buffer)) return;
     wl_buffer_destroy(buffer);
     _GLFWwindow *window = _glfwWindowForId((uintptr_t)data);
     if (window && window_has_buffer(window, buffer)) decs.buffer_destroyed = true;

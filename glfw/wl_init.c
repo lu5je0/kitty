@@ -388,6 +388,12 @@ static void keyboardHandleEnter(void* data UNUSED,
     _glfw.wl.keyboardFocusId = window->id;
     _glfw.wl.lastKeyboardFocusId = window->id;
     _glfwInputWindowFocus(window, true);
+    // fork-local (see AGENTS.md): mutter sends configure(activated) before
+    // keyboard enter, so the focus-dependent CSD paint done on configure used a
+    // stale focusedWindowId; repaint now that keyboard focus is known. The sync
+    // shadow subsurfaces latch until the next parent commit, which the focus
+    // change itself triggers (cursor repaint).
+    csd_change_title(window);
     uint32_t* key;
     if (keys && _glfw.wl.keyRepeatInfo.key) {
         wl_array_for_each(key, keys) {
@@ -412,6 +418,8 @@ static void keyboardHandleLeave(void* data UNUSED,
     _glfw.wl.serial = serial;
     _glfw.wl.keyboardFocusId = 0;
     _glfwInputWindowFocus(window, false);
+    // fork-local: repaint focus-dependent CSD, see keyboardHandleEnter
+    csd_change_title(window);
     stop_key_repeat_timer();
 }
 

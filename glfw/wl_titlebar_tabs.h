@@ -41,3 +41,7 @@ void wl_titlebar_tabs_destroy_corner_patches(_GLFWwindow *window);
 // at the end
 // of create_shadow_tile(); a no-op for windows without titlebar tabs.
 void wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window);
+// While tabs are shown, keeps CSD buffers alive when the compositor releases
+// them instead of letting buffer_release_event destroy them (which would force
+// a full CSD buffer rebuild on the next redraw). Hooked in buffer_release_event.
+bool wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer);

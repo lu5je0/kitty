@@ -1552,6 +1552,11 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
                     const double ct = anim_current(&t->color);
                     t->from_fg = mix_rgb(t->from_fg, t->fg, ct);
                     t->from_bg = mix_rgb(t->from_bg, t->bg, ct);
+                    // fold the hover tint into the start colour: active tabs
+                    // are drawn without it, so starting from the untinted bg
+                    // would dip darker before brightening towards active
+                    const double hp = anim_current(&t->hover);
+                    if (hp > 0) t->from_bg = mix_rgb(t->from_bg, luminance(t->from_bg) < 0.5 ? 0xffffff : 0x000000, 0.08 * hp);
                     start_anim(&t->color, 0, 1);
                 } else {
                     t->from_fg = fg; t->from_bg = bg;
@@ -1643,4 +1648,26 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
 GLFWAPI bool
 glfwWaylandTitlebarTabsRounded(GLFWwindow *handle) {
     return handle ? wl_titlebar_tabs_rounded((_GLFWwindow*)handle) : false;
+}
+
+// Upstream's buffer_release_event destroys every CSD buffer as soon as the
+// compositor releases it and flags decs.buffer_destroyed, which makes the next
+// redraw tear down and rebuild ALL decoration buffers (munmap + re-render of
+// the bar and every shadow + re-attach of 9 surfaces). Fine for upstream's
+// rare redraws, but the tab animations commit every 16ms, turning that into a
+// per-frame rebuild storm: destroying buffers still displayed by the
+// titlebar/shadow surfaces flashes them, and the constant rebuilds make tab
+// clicks feel slow. While tabs are shown, keep released buffers alive for
+// reuse and reclaim ownership of them (the *_needs_to_be_destroyed flags) so
+// free_csd_buffers() disposes of them on resize/scale changes.
+bool
+wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer) {
+    if (!wl_titlebar_tabs_active(window)) return false;
+#define Q(which) \
+    if (decs.which.buffer.a == buffer) { decs.which.buffer.a_needs_to_be_destroyed = true; return true; } \
+    if (decs.which.buffer.b == buffer) { decs.which.buffer.b_needs_to_be_destroyed = true; return true; }
+    Q(titlebar); Q(shadow_left); Q(shadow_top); Q(shadow_right); Q(shadow_bottom);
+    Q(shadow_upper_left); Q(shadow_upper_right); Q(shadow_lower_left); Q(shadow_lower_right);
+#undef Q
+    return false;
 }
