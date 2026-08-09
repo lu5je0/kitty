@@ -179,9 +179,12 @@ consumption to do the same tasks.
 Detailed list of changes
 -------------------------------------
 
-
-0.48.3 [future]
+0.49.0 [future]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Add a new :code:`kitten @ screenshot` remote control command to take a pixel perfect PNG screenshot of an OS Window, tab or window
+
+- A new option, :opt:`padding_fill_strategy` to control how the thin padding strips that appear when the window size is not an exact multiple of the cell size are colored. You can choose to have the padding colored to match the background of each neighboring cell, effectively extending the size of the cell or you can continue to use the existing behavior of using the background.
 
 - Wayland: Fix the first movement of the scroll wheel after reversing direction
   often not scrolling, with high resolution wheels such as the Logitech MX
@@ -193,6 +196,8 @@ Detailed list of changes
 - Vertical tabs: Improve rendering of tabs when using the ``fade`` :opt:`tab_bar_style`
 
 - :opt:`remember_window_size` now also remembers window maximized state (:pull:`10308`)
+
+- Sessions: Also save/restore layouts other than the currently active layout (:pull:`10324`)
 
 
 0.48.2 [2026-07-30]
