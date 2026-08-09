@@ -640,6 +640,12 @@ init_keys(PyObject *module) {
 // object is per-seat and stateful, so kitty pushes the active window's
 // mDISABLE_IME flag to glfw whenever IME focus is about to be updated. The
 // wayland-only glfw symbol is NULL on other backends.
+// The focus events alone are not enough: Python runs Window.focus_changed() for
+// both the outgoing and incoming window before pushing the new active window
+// index to C (window_list.notify_on_active_window_change -> tabs.active_window_changed),
+// so at that point this reads the outgoing window's flag. child-monitor.c therefore
+// re-asserts this once per frame for the active window; glfw dedupes, so an
+// unchanged value costs nothing.
 void
 fork_ime_sync_wayland_inhibit(OSWindow *osw) {
     if (!global_state.is_wayland || !glfwWaylandSetIMEInhibited) return;
