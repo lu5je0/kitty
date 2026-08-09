@@ -81,6 +81,12 @@
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。
 - 合并主干时 `glfw/wl_client_side_decorations.c` 的 7 处钩子要保留（6 处单行 + `buffer_release_event()` 开头 2 行的 buffer 保留早退）；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。
 - 动画已实现（同 macOS：0.18s ease-out ×5 种；见 wl_titlebar_tabs.c 的 Anim 引擎）。跨窗口拖拽（Stage 4，上游 mime 方案）尚未实现，见 todo.md。
+- **动画帧的 buffer 策略（`anim_tick`）**：16ms 动画 timer 直接调 `csd_change_title` 有两个坑：(1) titlebar CSD 只有 a/b 两个 shm buffer，`update_title_bar()` 无条件往 `back` 写再 swap+attach，compositor 还没 release 时就是往正在显示的内存里画；(2) compositor 的 release 平均要一个合成周期，16ms 提交节奏下双缓冲经常供不上（实测 30–50% 的帧碰上 back busy；曾试过"busy 就丢帧等下一 tick"，结果 compositor 只在收到新 buffer 时才 release 旧的，直接死锁成"冻住到 24 帧兜底强制重绘"，比撕裂更卡）。现行方案：`WaylandTabBarState.anim_ring`——fork 自持的 2 个 shm buffer（几何随 titlebar buffer，尺寸变了重建），back 空闲时走上游路径（`titlebar_back_buffer_is_free()` 靠 retain 钩子维护的 `*_needs_to_be_destroyed` 标志判断），back busy 时渲染进空闲 ring 槽直接 attach+commit，ring 槽有自己的 release listener 维护 busy 标志。上游 pair 的记账、mapping 零接触。仍然跳帧的只有两种：`csd_rebuild_pending()`（size/scale/titlebar 存在性变了，configure 路径马上会重绘+重分配，动画 timer 绝不能触发那次全量重建）和 4 个 buffer 全 busy（罕见）。`anim_ring_paint()` 里的配色选择是照抄 `render_title_bar()` 开头的镜像，上游改配色逻辑时最多色偏、不会崩。
+- **卡顿诊断日志（临时，排查完可删）**：`wl_titlebar_tabs.c` 顶部的 `lag_log()`，常开、无需环境变量，写 `$XDG_RUNTIME_DIR/kitty-titlebar-tabs.log`（无该变量则 `/tmp`），超 1MB 自动从头覆盖。只在关键点/异常时写，空闲零成本。几种行：
+  - `click activate tab N: handler blocked Xus` — 点击 tab 时 `titlebar_tab_action` 回调（同步跑 kitty 的 Python handler）阻塞 Wayland 事件循环多久。X 很大 → 卡在 Python/boss 侧，不是绘制。
+  - `push: N tabs, Xus, Yus since click, rebuild_pending=B` — Python 推一次 tab 数据的耗时 X，以及距那次点击 Y（Y 大 = 点击到 Python 响应慢）。`B=1` 表示这次推送会连带一次 CSD buffer 全量重建。
+  - `tick late: Xus after previous` — 16ms 的动画 timer 迟到超过 32ms，说明事件循环被别处（kitty 渲染/Python）堵住了，**不是** tab 栏自己的问题。
+  - `slow frame: Xus ...`（单帧绘制超 8ms）、`forced repaint after N declined frames ...`（连续丢帧 24 次后的强制重绘）、`burst end: ...`（每段动画结束的汇总：实际墙钟时长 vs 180ms 动画时长、tick 数、真正绘制帧数、丢帧数及原因分布、最慢帧、最大 tick 间隔）。`burst end` 墙钟远超 180ms 或 `worst gap` 很大 → 事件循环被堵；`skipped busy` 很高 → compositor 迟迟不 release buffer。
 
 ## 特性：按 window 彻底禁用输入法
 
@@ -123,6 +129,7 @@ macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input
 
 - glfw 侧（`glfw/wl_text_input.c`）加一个模块级 `fork_ime_inhibited` 标志 + 导出 `glfwWaylandSetIMEInhibited(bool)`（走 glfw.py 硬编码清单 + wrapper 动态加载，非 Wayland 后端符号为 NULL 静默跳过）。上游有两处会 re-enable，都已拦截：`text_input_enter`（compositor enter 时无条件 enable，插了一行早退）和 `_glfwPlatformUpdateIMEState` 的 `GLFW_IME_UPDATE_FOCUS` case（顶部插一行走 `fork_ime_force_disable()`，该 helper 是新增函数，镜像上游 else 分支的清理逻辑）。切换标志时若 `ime_focused` 会立即 disable / 恢复 enable。
 - kitty 侧的同步点：`keys.c` 末尾新增 `fork_ime_sync_wayland_inhibit(OSWindow*)`（inhibit = 聚焦 OS window 的 active kitty window 的 `mDISABLE_IME`；非聚焦 OS window 不许推送，因为 text input 跟随键盘焦点）。它在两个 FOCUS 事件发送点**之前**被调：`update_ime_focus()` 开头 1 行、`kitty/glfw.c` `window_focus_callback` 里 1 行。OSC / Python setter / 窗口焦点切换全部汇聚到 `update_ime_focus`，所以 `fork-ime.h` 零改动即可生效。
+- **但只靠焦点事件不够，必须每帧再断言一次**（修"切 pane 后丢 input context、打不出中文"）：Python 切 window 时 `window_list.notify_on_active_window_change()` 先对旧/新 window 各调一次 `focus_changed()`，**之后**才由 `tabs.active_window_changed()` → `set_active_window()` 把新的 active window 推给 C。所以上面两个同步点读到的是**切换前**那个 pane 的 flag：从 nvim(normal，已禁用) 切到普通 pane 时推的还是 `true`（去重后 no-op），之后没有任何路径再 sync，`zwp_text_input_v3` 就一直停在 disabled，直到 OS window 焦点变化或该 pane 里的程序恰好发一次 ime OSC 才自愈（所以是"有时候"）。修法：`child-monitor.c` `prepare_to_render_os_window()` 的 active window 分支再插 1 行 `fork_ime_sync_wayland_inhibit(os_window)`，每帧按当时的 active window 重新推一次——纯声明式，顺带覆盖关闭/detach window、切 tab 等所有时序，且 `glfwWaylandSetIMEInhibited` 自带去重，值不变零开销。切 pane 时会多一次冗余 disable/enable（下一帧纠正，<1 帧），可接受。
 - RIS 兜底：`do_screen_reset` 清 modes 前插了 1 行 `fork_ime_set_disabled(self, false)`——macOS 靠 `modes = empty_modes` 就够，但 Wayland 的 inhibit 状态在 glfw 里，必须走通知路径推一次（函数自带去重，flag 没置时是 no-op）。
 - 候选框锚定：`prepare_ime_position_update_event`（keys.c）末尾插了几行 fork-local 覆盖——Wayland 组词时上报 `overlay_line.xstart`（preedit 第一个格子）而不是上游的 `cursor_x`（preedit 内部光标），否则每打一个字候选框跳一格；同时 `top` 下移 1/4 个 cell，避免候选框贴住 preedit 行。注意这个 1/4 cell 下移在 Wayland 下**无条件**生效（不只 overlay 激活时），否则组词前每帧上报的矩形和组词中的差 1/4 cell，候选框出现后会往下挪一下。
 - 候选框首现位置（GNOME 上"先出现在上次打字的位置再跳过来"的 bug）：上游只在按键到达（子进程回显**之前**）或组词已开始后才推 `set_cursor_rectangle`，commit 后子进程异步回显、光标前移时**没有任何路径**推送新矩形，所以下次组词 compositor 手里还是旧矩形。修法：`keys.c` 末尾新增 `fork_ime_report_render_cursor()`，在 `child-monitor.c` `prepare_to_render_os_window()` 的 active window 分支插 1 行，每帧对聚焦窗口上报光标矩形；glfw 侧 `wl_text_input.c` 本来就按矩形去重（不变不 commit），零额外状态，也不会触发 GNOME done 事件循环（#5105）。
@@ -146,7 +153,7 @@ macOS 那套"每键实时读 flag"在 Wayland 行不通：IME 走 zwp_text_input
 | `glfw/glfw.py` | 硬编码清单加 `glfwWaylandSetIMEInhibited` 1 行 |
 | `kitty/keys.c` | `update_ime_focus()` 开头插 1 行 sync 调用；文件末尾追加 `fork_ime_sync_wayland_inhibit()` 和 `fork_ime_report_render_cursor()` 实现；`prepare_ime_position_update_event()` 末尾插 3 行（Wayland 候选框锚定 preedit 起点） |
 | `kitty/state.h` | 文件末尾追加 `fork_ime_sync_wayland_inhibit`、`fork_ime_report_render_cursor` 声明 2 行 |
-| `kitty/child-monitor.c`（Wayland 部分） | `prepare_to_render_os_window()` active window 分支插 1 行 `fork_ime_report_render_cursor()`（每帧上报光标矩形，修 GNOME 候选框首现在旧位置的 bug） |
+| `kitty/child-monitor.c`（Wayland 部分） | `prepare_to_render_os_window()` active window 分支插 2 行：`fork_ime_sync_wayland_inhibit()`（每帧重新断言 inhibit，修切 pane 后丢 input context）+ `fork_ime_report_render_cursor()`（每帧上报光标矩形，修 GNOME 候选框首现在旧位置的 bug） |
 | `kitty/glfw.c`（Wayland 部分） | `window_focus_callback` 里构造 FOCUS 事件前插 1 行 sync 调用 |
 | `kitty/screen.c`（Wayland 部分） | `do_screen_reset` 清 modes 前插 1 行 `fork_ime_set_disabled(self, false)` |
 | `kitty/glfw-wrapper.{h,c}` | 生成文件，`cd glfw && python3 glfw.py` 重新生成，勿手改 |

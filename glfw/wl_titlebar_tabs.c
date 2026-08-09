@@ -10,11 +10,13 @@
 
 #include "wl_client_side_decorations.h"
 #include "backend_utils.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 // Needed for the BTN_* defines
 #ifdef __has_include
@@ -37,6 +39,47 @@ tabs_debug_enabled(void) {
     return cached == 1;
 }
 #define TABS_DEBUG(...) do { if (tabs_debug_enabled()) { fprintf(stderr, "[titlebar-tabs] " __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } } while (0)
+
+// Lag diagnostics {{{
+// Always on and anomaly driven, so a hard-to-reproduce stutter can be diagnosed
+// after the fact without knowing in advance which run to instrument: one line
+// per tab push from Python, one summary line per animation burst, and an
+// immediate line whenever a frame is slow or arrives late. Idle costs nothing.
+static void
+lag_log(const char *fmt, ...) {
+    static FILE *f = NULL;
+    static bool opened = false;
+    if (!opened) {
+        opened = true;
+        const char *dir = getenv("XDG_RUNTIME_DIR");
+        char path[512];
+        snprintf(path, sizeof(path), "%s/kitty-titlebar-tabs.log", (dir && dir[0]) ? dir : "/tmp");
+        struct stat st;
+        const bool too_big = stat(path, &st) == 0 && st.st_size > 1024 * 1024;
+        f = fopen(path, too_big ? "w" : "a");
+        if (f) {
+            setvbuf(f, NULL, _IOLBF, 0);
+            fprintf(f, "=== pid %d ===\n", (int)getpid());
+        }
+    }
+    if (!f) return;
+    fprintf(f, "%9.3f ", monotonic_t_to_s_double(monotonic()));
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+}
+
+// timestamp of the last click that asked kitty to switch tabs, so the push that
+// comes back from Python can report the round-trip latency
+static monotonic_t lag_click_at = 0;
+// same click, but kept until the content surface actually swaps so the
+// click -> visible-content latency (the lag the user perceives) can be reported
+static monotonic_t lag_click_awaiting_swap = 0;
+// when the last wl frame callback was requested for the content surface
+static monotonic_t lag_frame_requested_at = 0;
+// }}}
 
 // Logical (unscaled) metrics: the macOS values scaled by PT_PARITY.
 // macOS lays text out at 72 dpi while Linux effectively uses ~96, so the
@@ -223,11 +266,25 @@ typedef struct WaylandTabBarState {
     uint8_t *corner_map;
     size_t corner_map_size;
     int corner_px;  // scaled patch size the buffers were built for
+    // fork-owned overflow buffers for the 16ms animation commits: the upstream
+    // titlebar pair alone cannot sustain that rate because the compositor holds
+    // each attached buffer for about a frame before releasing it. When the
+    // upstream back buffer is still held, anim_tick renders into a free ring
+    // buffer instead; upstream's pair, flags and mapping are never touched.
+    struct {
+        struct wl_buffer *buffer[2];
+        uint8_t *data[2];
+        bool busy[2];       // attached and not yet released by the compositor
+        uint8_t *map;
+        size_t map_size;
+        size_t width, height;  // scaled px geometry the ring was built for
+    } anim_ring;
     struct WaylandTabBarState *next;
 } WaylandTabBarState;
 
 static WaylandTabBarState *all_states = NULL;
 static void destroy_drag_ghost(WaylandTabBarState *s);
+static void destroy_anim_ring(WaylandTabBarState *s);
 
 static WaylandTabBarState*
 state_for_window(uintptr_t window_id, bool create) {
@@ -399,6 +456,7 @@ wl_titlebar_tabs_free(_GLFWwindow *window) {
             clear_tabs(s);
             destroy_corner_patches(s);
             destroy_drag_ghost(s);
+            destroy_anim_ring(s);
             free(s->tabs);
             free(s->render_scratch);
             free(s);
@@ -1138,6 +1196,119 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
 static id_type anim_timer = 0;
 static bool anim_timer_enabled = false;
 
+// The titlebar CSD is double buffered, so an animation frame can come due while
+// the compositor still holds the buffer update_title_bar() is about to render
+// into (it renders into `back`, then swaps and attaches). Overwriting a buffer
+// that is still on screen tears; the render_scratch canvas above only narrows
+// that window down to a single memcpy. `*_needs_to_be_destroyed` tracks exactly
+// this ownership: damage_csd() clears it when the compositor takes the buffer
+// and wl_titlebar_tabs_retain_released_buffer() sets it again on release.
+static bool
+titlebar_back_buffer_is_free(_GLFWwindow *window) {
+    if (!decs.titlebar.surface) return true;
+    const _GLFWWaylandBufferPair *b = &decs.titlebar.buffer;
+    if (b->back == b->a) return b->a_needs_to_be_destroyed;
+    if (b->back == b->b) return b->b_needs_to_be_destroyed;
+    return true;
+}
+
+// csd_change_title() -> ensure_csd_resources() tears down and rebuilds all nine
+// CSD buffer pairs when the size, scale or titlebar presence changed. Servicing
+// that from the 16ms animation timer is what made tab switches sluggish: it
+// munmaps buffers the decoration surfaces are still displaying and re-renders
+// every shadow. The configure/resize paths call ensure_csd_resources()
+// themselves, so an animation frame can simply wait for them. Mirrors the
+// rebuild condition of ensure_csd_resources() (toplevel state changes are
+// deliberately excluded: those repaint without reallocating).
+static bool
+csd_rebuild_pending(_GLFWwindow *window) {
+    if (!decs.mapping.data || decs.buffer_destroyed) return true;
+    if (decs.for_window_state.width != window->wl.width) return true;
+    if (decs.for_window_state.height != window->wl.height) return true;
+    if (decs.for_window_state.fscale != _glfwWaylandWindowScale(window)) return true;
+    const bool has_titlebar = !decs.titlebar_hidden;
+    return (has_titlebar && !decs.titlebar.surface) || (!has_titlebar && decs.titlebar.surface);
+}
+
+static void
+anim_ring_handle_release(void *data, struct wl_buffer *buffer UNUSED) {
+    *(bool*)data = false;
+}
+static const struct wl_buffer_listener anim_ring_listener = {.release = anim_ring_handle_release};
+
+static void
+destroy_anim_ring(WaylandTabBarState *s) {
+    for (int i = 0; i < 2; i++) {
+        if (s->anim_ring.buffer[i]) wl_buffer_destroy(s->anim_ring.buffer[i]);
+        s->anim_ring.buffer[i] = NULL; s->anim_ring.data[i] = NULL; s->anim_ring.busy[i] = false;
+    }
+    if (s->anim_ring.map) munmap(s->anim_ring.map, s->anim_ring.map_size);
+    s->anim_ring.map = NULL; s->anim_ring.map_size = 0;
+    s->anim_ring.width = 0; s->anim_ring.height = 0;
+}
+
+static bool
+ensure_anim_ring(_GLFWwindow *window, WaylandTabBarState *s) {
+    const size_t w = decs.titlebar.buffer.width, h = decs.titlebar.buffer.height;
+    if (!w || !h) return false;
+    if (s->anim_ring.map && s->anim_ring.width == w && s->anim_ring.height == h) return true;
+    destroy_anim_ring(s);
+    const size_t stride = 4 * w, sz = stride * h, total = 2 * sz;
+    const int fd = createAnonymousFile(total);
+    if (fd < 0) return false;
+    uint8_t *map = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) { close(fd); return false; }
+    struct wl_shm_pool *pool = wl_shm_create_pool(_glfw.wl.shm, fd, total);
+    close(fd);
+    if (!pool) { munmap(map, total); return false; }
+    s->anim_ring.map = map; s->anim_ring.map_size = total;
+    for (int i = 0; i < 2; i++) {
+        s->anim_ring.buffer[i] = wl_shm_pool_create_buffer(pool, i * sz, w, h, stride, WL_SHM_FORMAT_ARGB8888);
+        s->anim_ring.data[i] = map + i * sz;
+        if (s->anim_ring.buffer[i]) wl_buffer_add_listener(s->anim_ring.buffer[i], &anim_ring_listener, &s->anim_ring.busy[i]);
+    }
+    wl_shm_pool_destroy(pool);
+    if (!s->anim_ring.buffer[0] || !s->anim_ring.buffer[1]) { destroy_anim_ring(s); return false; }
+    s->anim_ring.width = w; s->anim_ring.height = h;
+    return true;
+}
+
+// Renders one animation frame into a free ring slot and presents it on the
+// titlebar surface. The colour selection mirrors the top of render_title_bar()
+// (wl_client_side_decorations.c); only the custom-colour values survive into
+// render_bar unchanged, everything else is recomputed there, so a drifted
+// mirror shows up as at most a wrong custom tint, never a crash.
+static bool
+anim_ring_paint(_GLFWwindow *window, WaylandTabBarState *s) {
+    if (!decs.titlebar.surface) return false;
+    if (!ensure_anim_ring(window, s)) return false;
+    const int slot = !s->anim_ring.busy[0] ? 0 : (!s->anim_ring.busy[1] ? 1 : -1);
+    if (slot < 0) return false;
+    const bool is_focused = window->id == _glfw.focusedWindowId;
+    uint32_t bg = is_focused ? 0xffdddad6 : 0xffeeeeee, fg = is_focused ? 0xff444444 : 0xff888888;
+    bool is_dark = false;
+    GLFWColorScheme appearance = glfwGetCurrentSystemColorTheme(false);
+    if (decs.use_custom_titlebar_color || appearance == GLFW_COLOR_SCHEME_NO_PREFERENCE) {
+        const uint32_t c = 0xff000000 | (decs.titlebar_color & 0xffffff);
+        const double luma = 0.2126 * (((c >> 16) & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * ((c & 0xFF) / 255.0);
+        if (luma < 0.5) { fg = is_focused ? 0xffffffff : 0xffcccccc; is_dark = true; }
+        if (decs.use_custom_titlebar_color) bg = c;
+        else if (is_dark) bg = is_focused ? 0xff303030 : 0xff242424;
+    } else if (appearance == GLFW_COLOR_SCHEME_DARK) {
+        is_dark = true;
+        bg = is_focused ? 0xff303030 : 0xff242424;
+        fg = is_focused ? 0xffffffff : 0xffcccccc;
+    }
+    wl_titlebar_tabs_render_bar(window, s->anim_ring.data[slot], bg, fg, 0, is_dark);
+    wl_surface_attach(decs.titlebar.surface, s->anim_ring.buffer[slot], 0, 0);
+    if (decs.titlebar.wp_viewport)
+        wp_viewport_set_destination(decs.titlebar.wp_viewport, decs.titlebar.buffer.viewport_width, decs.titlebar.buffer.viewport_height);
+    wl_surface_damage(decs.titlebar.surface, 0, 0, s->anim_ring.width, s->anim_ring.height);
+    wl_surface_commit(decs.titlebar.surface);
+    s->anim_ring.busy[slot] = true;
+    return true;
+}
+
 static bool
 entry_animating(WaylandTabEntry *t) {
     return t->dying || anim_is_running(&t->move_x) || anim_is_running(&t->move_w)
@@ -1153,6 +1324,23 @@ state_animating(WaylandTabBarState *s) {
 
 static void
 anim_tick(id_type timer_id UNUSED, void *data UNUSED) {
+    // per-burst lag statistics, reported in one line when the burst ends
+    static struct {
+        monotonic_t start, last_tick, max_paint, max_gap;
+        unsigned ticks, paints, ring_paints, skip_busy, skip_rebuild;
+    } burst;
+    const monotonic_t tick_at = monotonic();
+    if (!burst.start) { memset(&burst, 0, sizeof(burst)); burst.start = tick_at; }
+    else {
+        const monotonic_t gap = tick_at - burst.last_tick;
+        if (gap > burst.max_gap) burst.max_gap = gap;
+        // the timer asked for 16ms; a much later tick means the event loop was
+        // blocked elsewhere (kitty's render/Python side), not by the tab bar
+        if (gap > ms_to_monotonic_t(32)) lag_log("tick late: %dus after previous", monotonic_t_to_us(gap));
+    }
+    burst.last_tick = tick_at;
+    burst.ticks++;
+
     bool any_active = false;
     for (WaylandTabBarState *s = all_states; s; s = s->next) {
         _GLFWwindow *window = _glfwWindowForId(s->window_id);
@@ -1169,11 +1357,36 @@ anim_tick(id_type timer_id UNUSED, void *data UNUSED) {
         }
         if (!state_animating(s)) continue;
         any_active = true;
-        csd_change_title(window);
+        // a pending rebuild means the titlebar geometry is stale; the configure
+        // path repaints (and reallocates) very soon, so skip rather than paint
+        // a wrong-sized frame or trigger the reallocation from this timer
+        if (csd_rebuild_pending(window)) { burst.skip_rebuild++; continue; }
+        const monotonic_t paint_start = monotonic();
+        if (titlebar_back_buffer_is_free(window)) {
+            csd_change_title(window);
+            burst.paints++;
+        } else if (anim_ring_paint(window, s)) {
+            burst.ring_paints++;
+        } else {
+            burst.skip_busy++;  // all four buffers held by the compositor
+            continue;
+        }
+        const monotonic_t cost = monotonic() - paint_start;
+        if (cost > burst.max_paint) burst.max_paint = cost;
+        if (cost > ms_to_monotonic_t(8))
+            lag_log("slow frame: %dus for %zu tabs, bar %zux%zu", monotonic_t_to_us(cost), s->count,
+                    decs.titlebar.buffer.width, decs.titlebar.buffer.height);
     }
     if (!any_active && anim_timer_enabled) {
         toggleTimer(&_glfw.wl.eventLoopData, anim_timer, 0);
         anim_timer_enabled = false;
+        lag_log("burst end: %dms wall (anim is %dms), %u ticks, %u painted (%u via ring), %u skipped (busy %u, rebuild %u), "
+                "worst frame %dus, worst gap %dus",
+                monotonic_t_to_ms(tick_at - burst.start), monotonic_t_to_ms(ANIM_DURATION), burst.ticks,
+                burst.paints + burst.ring_paints, burst.ring_paints,
+                burst.skip_busy + burst.skip_rebuild, burst.skip_busy, burst.skip_rebuild,
+                monotonic_t_to_us(burst.max_paint), monotonic_t_to_us(burst.max_gap));
+        burst.start = 0;
     }
 }
 
@@ -1455,8 +1668,16 @@ wl_titlebar_tabs_handle_button(_GLFWwindow *window, uint32_t button, uint32_t st
             break;
         case PRESS_TAB:
             if (t && t->tab_id == s->pressed_tab_id) {
+                const bool activate = button != BTN_MIDDLE;
+                // the callback runs kitty's Python handler synchronously on this
+                // thread, so its duration is time the compositor sees us stalled
+                const monotonic_t clicked_at = monotonic();
+                lag_click_at = clicked_at;
+                if (activate) lag_click_awaiting_swap = clicked_at;
                 _glfw.callbacks.titlebar_tab_action((GLFWwindow*)window,
-                    button == BTN_MIDDLE ? GLFW_TITLEBAR_TAB_CLOSE : GLFW_TITLEBAR_TAB_ACTIVATE, t->tab_id, 0);
+                    activate ? GLFW_TITLEBAR_TAB_ACTIVATE : GLFW_TITLEBAR_TAB_CLOSE, t->tab_id, 0);
+                if (activate) lag_log("click activate tab %llu: handler blocked %dus",
+                                      t->tab_id, monotonic_t_to_us(monotonic() - clicked_at));
             }
             break;
     }
@@ -1513,6 +1734,7 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     WaylandTabBarState *s = state_for_window(window->id, true);
     if (!s) return;
     s->forced_appearance = forced_appearance;
+    const monotonic_t push_start = monotonic();
 
     // Diff the incoming list against the current entries by tab_id so
     // animation state survives updates.
@@ -1640,6 +1862,11 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // cover the rounded-off corners with shadow continuations (also runs from
     // ensure_csd_resources on resize/scale/focus changes)
     wl_titlebar_tabs_update_corner_patches(window);
+    lag_log("push: %zu tabs, %dus, %dus since click, rebuild_pending=%d",
+            count, monotonic_t_to_us(monotonic() - push_start),
+            lag_click_at ? monotonic_t_to_us(push_start - lag_click_at) : -1,
+            (int)csd_rebuild_pending(window));
+    lag_click_at = 0;
 }
 
 // kitty's GL renderer draws the bottom corner cutouts and the content area's
@@ -1670,4 +1897,30 @@ wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *b
     Q(shadow_upper_left); Q(shadow_upper_right); Q(shadow_lower_left); Q(shadow_lower_right);
 #undef Q
     return false;
+}
+
+// Temporary lag diagnostics: probes for the click -> frame-callback ->
+// content-swap chain, hooked from wl_window.c. kitty gates content rendering
+// on the compositor's frame callback (sync_to_monitor), so a late callback
+// directly delays the tab's content appearing after a click.
+void
+wl_titlebar_tabs_note_frame_request(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window)) return;
+    lag_frame_requested_at = monotonic();
+}
+
+void
+wl_titlebar_tabs_note_frame_done(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window) || !lag_frame_requested_at) return;
+    const monotonic_t delta = monotonic() - lag_frame_requested_at;
+    lag_frame_requested_at = 0;
+    if (delta > ms_to_monotonic_t(50))
+        lag_log("frame callback arrived %dus after request", monotonic_t_to_us(delta));
+}
+
+void
+wl_titlebar_tabs_note_swap(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window) || !lag_click_awaiting_swap) return;
+    lag_log("content swap: %dus since click", monotonic_t_to_us(monotonic() - lag_click_awaiting_swap));
+    lag_click_awaiting_swap = 0;
 }
