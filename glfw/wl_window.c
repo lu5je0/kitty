@@ -432,7 +432,6 @@ resizeFramebuffer(_GLFWwindow *window) {
 
 void
 _glfwWaylandAfterBufferSwap(_GLFWwindow *window) {
-    wl_titlebar_tabs_note_swap(window);  // fork-local lag probe, see AGENTS.md
     if (window->wl.temp_buffer_used_during_window_creation) {
         wl_buffer_destroy(window->wl.temp_buffer_used_during_window_creation);
         window->wl.temp_buffer_used_during_window_creation = NULL;
@@ -2938,7 +2937,6 @@ static void
 frame_handle_redraw(void *data, struct wl_callback *callback, uint32_t time UNUSED) {
     _GLFWwindow *window = (_GLFWwindow *)data;
     if (callback == window->wl.frameCallbackData.current_wl_callback) {
-        wl_titlebar_tabs_note_frame_done(window);  // fork-local lag probe, see AGENTS.md
         window->wl.frameCallbackData.callback(window->wl.frameCallbackData.id);
         window->wl.frameCallbackData.current_wl_callback = NULL;
     }
@@ -3032,7 +3030,6 @@ glfwRequestWaylandFrameEvent(GLFWwindow *handle, unsigned long long id, void (*c
         window->wl.frameCallbackData.current_wl_callback = wl_surface_frame(window->wl.surface);
         if (window->wl.frameCallbackData.current_wl_callback) {
             wl_callback_add_listener(window->wl.frameCallbackData.current_wl_callback, &frame_listener, window);
-            wl_titlebar_tabs_note_frame_request(window);  // fork-local lag probe, see AGENTS.md
             commit_window_surface_if_safe(window);
         }
     }

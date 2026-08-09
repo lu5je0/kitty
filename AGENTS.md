@@ -82,11 +82,7 @@
 - 合并主干时 `glfw/wl_client_side_decorations.c` 的 7 处钩子要保留（6 处单行 + `buffer_release_event()` 开头 2 行的 buffer 保留早退）；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。
 - 动画已实现（同 macOS：0.18s ease-out ×5 种；见 wl_titlebar_tabs.c 的 Anim 引擎）。跨窗口拖拽（Stage 4，上游 mime 方案）尚未实现，见 todo.md。
 - **动画帧的 buffer 策略（`anim_tick`）**：16ms 动画 timer 直接调 `csd_change_title` 有两个坑：(1) titlebar CSD 只有 a/b 两个 shm buffer，`update_title_bar()` 无条件往 `back` 写再 swap+attach，compositor 还没 release 时就是往正在显示的内存里画；(2) compositor 的 release 平均要一个合成周期，16ms 提交节奏下双缓冲经常供不上（实测 30–50% 的帧碰上 back busy；曾试过"busy 就丢帧等下一 tick"，结果 compositor 只在收到新 buffer 时才 release 旧的，直接死锁成"冻住到 24 帧兜底强制重绘"，比撕裂更卡）。现行方案：`WaylandTabBarState.anim_ring`——fork 自持的 2 个 shm buffer（几何随 titlebar buffer，尺寸变了重建），back 空闲时走上游路径（`titlebar_back_buffer_is_free()` 靠 retain 钩子维护的 `*_needs_to_be_destroyed` 标志判断），back busy 时渲染进空闲 ring 槽直接 attach+commit，ring 槽有自己的 release listener 维护 busy 标志。上游 pair 的记账、mapping 零接触。仍然跳帧的只有两种：`csd_rebuild_pending()`（size/scale/titlebar 存在性变了，configure 路径马上会重绘+重分配，动画 timer 绝不能触发那次全量重建）和 4 个 buffer 全 busy（罕见）。`anim_ring_paint()` 里的配色选择是照抄 `render_title_bar()` 开头的镜像，上游改配色逻辑时最多色偏、不会崩。
-- **卡顿诊断日志（临时，排查完可删）**：`wl_titlebar_tabs.c` 顶部的 `lag_log()`，常开、无需环境变量，写 `$XDG_RUNTIME_DIR/kitty-titlebar-tabs.log`（无该变量则 `/tmp`），超 1MB 自动从头覆盖。只在关键点/异常时写，空闲零成本。几种行：
-  - `click activate tab N: handler blocked Xus` — 点击 tab 时 `titlebar_tab_action` 回调（同步跑 kitty 的 Python handler）阻塞 Wayland 事件循环多久。X 很大 → 卡在 Python/boss 侧，不是绘制。
-  - `push: N tabs, Xus, Yus since click, rebuild_pending=B` — Python 推一次 tab 数据的耗时 X，以及距那次点击 Y（Y 大 = 点击到 Python 响应慢）。`B=1` 表示这次推送会连带一次 CSD buffer 全量重建。
-  - `tick late: Xus after previous` — 16ms 的动画 timer 迟到超过 32ms，说明事件循环被别处（kitty 渲染/Python）堵住了，**不是** tab 栏自己的问题。
-  - `slow frame: Xus ...`（单帧绘制超 8ms）、`forced repaint after N declined frames ...`（连续丢帧 24 次后的强制重绘）、`burst end: ...`（每段动画结束的汇总：实际墙钟时长 vs 180ms 动画时长、tick 数、真正绘制帧数、丢帧数及原因分布、最慢帧、最大 tick 间隔）。`burst end` 墙钟远超 180ms 或 `worst gap` 很大 → 事件循环被堵；`skipped busy` 很高 → compositor 迟迟不 release buffer。
+- **点击 tab 后必须唤醒渲染循环**：`kitty/glfw.c` 的 `titlebar_tab_action_callback` 末尾有一行 `request_tick_callback()`，**不能删**。tab 点击走的是 fork 在 CSD 层的命中测试，不经过 kitty 的正常输入路径（上游的键盘/鼠标回调都会自带请求 tick），漏掉这行的话切 tab 后内容区不重绘，要等下一个无关事件（鼠标移动、子进程输出）才出现——实测延迟 50–900ms 且随机，"切到有输出的 nvim 快、切到闲置 shell 慢"。排查记录：点击→Python 切 tab 只要 0.4ms，但 `render()` 整段时间根本没被调用；曾依次误怀疑过 CSD buffer 重建、双缓冲撕裂、frame callback 门控，全部被日志排除。
 
 ## 特性：按 window 彻底禁用输入法
 

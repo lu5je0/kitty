@@ -45,8 +45,3 @@ void wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window);
 // them instead of letting buffer_release_event destroy them (which would force
 // a full CSD buffer rebuild on the next redraw). Hooked in buffer_release_event.
 bool wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer);
-// Temporary lag diagnostics (see AGENTS.md): three probes hooked into
-// wl_window.c measuring the click -> frame-callback -> content-swap chain.
-void wl_titlebar_tabs_note_frame_request(_GLFWwindow *window);
-void wl_titlebar_tabs_note_frame_done(_GLFWwindow *window);
-void wl_titlebar_tabs_note_swap(_GLFWwindow *window);

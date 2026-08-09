@@ -1243,6 +1243,11 @@ titlebar_tab_action_callback(GLFWwindow *window, GLFWTitlebarTabAction action, u
             call_boss(titlebar_tab_drag_out, "s", payload);
             break;
     }
+    // This callback comes from the fork's CSD hit-testing, not kitty's input
+    // path, so unlike upstream's key/mouse callbacks nothing else schedules a
+    // render tick; without one the switched-to tab's content is not drawn
+    // until the next unrelated wakeup.
+    request_tick_callback();
 }
 
 bool
