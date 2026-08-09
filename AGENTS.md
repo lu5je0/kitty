@@ -191,6 +191,21 @@ map ctrl+b>i enable_ime
   - **已知限制**：`init.lua` 保留了 rate limiter（7 次/0.5 秒），被限流的更新会**直接丢弃**。极快速地来回切模式有可能把最后一次 enable 丢掉，从而卡在禁用状态；靠下一次模式切换或 `BufEnter`/`WinEnter` 自愈。想彻底消除就把限流分支改成延后 550ms 重新 `sync`，而不是 return。
 - `zsh/vi-im-switch.zsh`——包装 `vi-mode.zsh` 已有的 `zle-keymap-select` / `zle-line-init` / `zle-line-finish` 三个钩子（用 `functions -c` 复制原函数再调用，**不能直接重定义**，否则会干掉光标形状逻辑）。`zshrc` 里 `vi-mode.zsh` 先 source，顺序不能反。
 
+## 特性：preedit 固定配色（preedit_foreground / preedit_background）
+
+**是什么**：两个新颜色选项，固定 IME 组词（pre-edit）文字的前景/背景色。默认 `none` 保持上游行为——上游是把「开始组词那一刻子进程留下的 SGR」反色来画 preedit，颜色随光标处语法高亮随机变。
+
+**实现**（全部纯新增行）：
+
+- `kitty/options/definition.py`：colors 组 `selection_background` 之后插两个 opt（`to_color_or_none` + `ctype='color_or_none_as_int'`）
+- `kitty/state.h`：`Options` 结构体**末尾**单独一行 `color_type preedit_foreground, preedit_background;`
+- `kitty/screen.c` `screen_draw_overlay_line()`：上游 `sgr.reverse ^= true` 之后插一段——任一选项非 0 时关掉 reverse、把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游的 reverse 还原行之前恢复保存的 fg/bg/reverse。上游行一字未改
+- `kitty/options/{parse.py,types.py,to-c-generated.h}`、`tools/cmd/at/set_colors.go`、`tools/themes/collection.go`：生成文件，`gen/config.py` 重新生成
+
+**已知限制**：`color_or_none_as_int` 把 `none` 编码为 0，纯黑 `#000000` 也是 0，会被当成未设置（上游 `tab_bar_background` 同款限制），要黑色用 `#010101`。
+
+用户配置：`~/.dotfiles/kitty/kitty.conf` 里 `preedit_foreground #252525` + `preedit_background #ebdcb2`（macOS 原生输入法组词条的米黄色）。
+
 ## macOS 26 视觉修正（与上游有意分歧，合并主干时注意）
 
 1. **回退上游 commit `b16221a1d`**（"macos: explicitly enable modern window corners on macOS 26"）：删除了 `glfw/cocoa_window.m` 中的 `apply_window_corner_curve()` 及其调用。合并主干如果冲突，**保持删除**。该提交在 glfw/glfw.py 中加的 QuartzCore 链接保留不动。

@@ -1306,6 +1306,32 @@ convert_from_opts_dim_opacity(PyObject *py_opts, Options *opts) {
 }
 
 static void
+convert_from_python_preedit_foreground(PyObject *val, Options *opts) {
+    opts->preedit_foreground = color_or_none_as_int(val);
+}
+
+static void
+convert_from_opts_preedit_foreground(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "preedit_foreground");
+    if (ret == NULL) return;
+    convert_from_python_preedit_foreground(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
+convert_from_python_preedit_background(PyObject *val, Options *opts) {
+    opts->preedit_background = color_or_none_as_int(val);
+}
+
+static void
+convert_from_opts_preedit_background(PyObject *py_opts, Options *opts) {
+    PyObject *ret = PyObject_GetAttrString(py_opts, "preedit_background");
+    if (ret == NULL) return;
+    convert_from_python_preedit_background(ret, opts);
+    Py_DECREF(ret);
+}
+
+static void
 convert_from_python_close_on_child_death(PyObject *val, Options *opts) {
     opts->close_on_child_death = PyObject_IsTrue(val);
 }
@@ -1740,6 +1766,10 @@ convert_opts_from_python_opts(PyObject *py_opts, Options *opts) {
     convert_from_opts_background_tint_gaps(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_dim_opacity(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_preedit_foreground(py_opts, opts);
+    if (PyErr_Occurred()) return false;
+    convert_from_opts_preedit_background(py_opts, opts);
     if (PyErr_Occurred()) return false;
     convert_from_opts_close_on_child_death(py_opts, opts);
     if (PyErr_Occurred()) return false;

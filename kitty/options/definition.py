@@ -2609,6 +2609,26 @@ opt(
 )
 
 opt(
+    'preedit_foreground',
+    'none',
+    option_type='to_color_or_none',
+    ctype='color_or_none_as_int',
+    long_text="""
+The foreground and background colors for IME pre-edit (composition) text.
+Setting both of these to :code:`none` (the default) will cause a "reverse
+video" effect for the pre-edit text, based on the colors of the text under
+the cursor at the time composition starts.
+""",
+)
+
+opt(
+    'preedit_background',
+    'none',
+    option_type='to_color_or_none',
+    ctype='color_or_none_as_int',
+)
+
+opt(
     'palette_generate',
     'fixed',
     choices=('fixed', 'semantic', 'legacy'),

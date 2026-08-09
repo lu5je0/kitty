@@ -183,6 +183,7 @@ typedef struct Options {
     bool generate_256_palette;
     int drag_threshold;
     float text_fg_override_threshold;
+    color_type preedit_foreground, preedit_background;
 } Options;
 
 typedef struct WindowLogoRenderData {

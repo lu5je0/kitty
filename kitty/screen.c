@@ -4693,6 +4693,14 @@ screen_draw_overlay_line(Screen *self) {
     Cursor *orig_cursor = self->cursor;
     self->cursor = &(self->overlay_line.original_line.cursor);
     self->cursor->sgr.reverse ^= true;
+    // fork: fixed pre-edit colors (preedit_foreground/preedit_background) override the reverse-video effect
+    const bool fork_orig_reverse = self->cursor->sgr.reverse;
+    const color_type fork_orig_fg = self->cursor->sgr.fg, fork_orig_bg = self->cursor->sgr.bg;
+    if (OPT(preedit_foreground) || OPT(preedit_background)) {
+        self->cursor->sgr.reverse = false;
+        if (OPT(preedit_foreground)) self->cursor->sgr.fg = ((OPT(preedit_foreground) & COL_MASK) << 8) | 2;
+        if (OPT(preedit_background)) self->cursor->sgr.bg = ((OPT(preedit_background) & COL_MASK) << 8) | 2;
+    }
     self->cursor->x = xstart;
     self->cursor->y = self->overlay_line.ynum;
     self->overlay_line.xnum = 0;
@@ -4744,6 +4752,9 @@ screen_draw_overlay_line(Screen *self) {
         self->overlay_line.xnum += len;
     }
     self->overlay_line.cursor_x = self->cursor->x;
+    // fork: restore SGR state possibly overridden by preedit_foreground/preedit_background
+    self->cursor->sgr.reverse = fork_orig_reverse;
+    self->cursor->sgr.fg = fork_orig_fg; self->cursor->sgr.bg = fork_orig_bg;
     self->cursor->sgr.reverse ^= true;
     self->cursor = orig_cursor;
     self->modes.mDECAWM = orig_line_wrap_mode;
