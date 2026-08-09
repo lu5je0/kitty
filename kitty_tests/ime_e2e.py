@@ -2,7 +2,7 @@ import os
 import shutil
 import time
 
-from kitty_tests import BaseTest
+from kitty_tests.base import BaseTest
 
 
 class TestImeE2E(BaseTest):

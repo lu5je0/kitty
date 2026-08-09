@@ -1,6 +1,6 @@
 from base64 import standard_b64encode
 
-from kitty_tests import BaseTest, parse_bytes
+from kitty_tests.base import BaseTest, parse_bytes
 
 
 def tui_bridge(method):
