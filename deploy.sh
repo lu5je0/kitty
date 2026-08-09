@@ -32,6 +32,11 @@ deploy_linux() {
         mkdir -p docs/_build/html docs/_build/man
     fi
 
+    # upstream's shader pipeline needs slangc; the repo bundles it
+    if ! command -v slangc >/dev/null 2>&1 && [[ -x dependencies/linux-amd64/bin/slangc ]]; then
+        export PATH="$PWD/dependencies/linux-amd64/bin:$PATH"
+    fi
+
     echo "Building $pkg_src ..."
     python3 setup.py linux-package
 

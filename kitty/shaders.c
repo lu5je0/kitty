@@ -2367,8 +2367,8 @@ draw_bottom_corner_masks(OSWindow *os_window) {
     const GLsizei w = os_window->viewport_width, h = os_window->viewport_height;
     if (r <= 0 || w < 2 * r || h < r) return;
     bind_program(CORNER_MASK_PROGRAM);
-    const GLint rect_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "rect");
-    const GLint border_loc = glGetUniformLocation(program_id(CORNER_MASK_PROGRAM), "border_color");
+    const GLint rect_loc = program_uniform_location(CORNER_MASK_PROGRAM, "rect");
+    const GLint border_loc = program_uniform_location(CORNER_MASK_PROGRAM, "border_color");
     glUniform4f(border_loc, 0.f, 0.f, 0.f, 0.f);  // cut mode
     glEnable(GL_BLEND);
     glBlendFunc(GL_ZERO, GL_SRC_ALPHA);  // dst *= coverage
