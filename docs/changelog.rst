@@ -184,6 +184,10 @@ Detailed list of changes
 
 - Add a new :code:`kitten @ screenshot` remote control command to take a pixel perfect PNG screenshot of an OS Window, tab or window
 
+- Add a new :code:`kitten @ set-os-window-title` remote control command to set
+  the title for an already-open OS Window and optionally restore automatic
+  title tracking when no title is specified
+
 - A new option, :opt:`padding_fill_strategy` to control how the thin padding strips that appear when the window size is not an exact multiple of the cell size are colored. You can choose to have the padding colored to match the background of each neighboring cell, effectively extending the size of the cell or you can continue to use the existing behavior of using the background.
 
 - Wayland: Fix the first movement of the scroll wheel after reversing direction
@@ -207,7 +211,7 @@ Detailed list of changes
 
 - diff kitten: Fix a rare crash when showing a large diff due to incorrect locking when highlighting
 
-- Allow the private DCS kitty-echo escape code to only echo numbers
+- Allow the private DCS kitty-echo escape code to only echo numbers (:cve:`2026-72913`)
 
 - Linux: Fix an approx 1MB memory leak when reloading the config, introduced in version 0.40.0 (:iss:`10290`)
 

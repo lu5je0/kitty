@@ -564,6 +564,7 @@ typedef struct OSWindow {
     } scroll;
     bool wayland_titlebar_tabs_active;  // fork: draw rounded bottom corners
     unsigned shader_anim_event_registry;
+    id_type last_bell_window_id; // ID of the most recent window that received a bell event
     struct {
         bool active;
         monotonic_t started_at;
