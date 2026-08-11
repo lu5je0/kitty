@@ -5,8 +5,11 @@ deploy_macos() {
     local app_src="kitty/launcher/kitty.app"
     local app_dst="/Applications/kitty.app"
 
+    echo "Building $app_src ..."
+    ./dev.sh build
+
     if [[ ! -d "$app_src" ]]; then
-        echo "Error: $app_src not found, run ./dev.sh build first" >&2
+        echo "Error: $app_src not found after build" >&2
         exit 1
     fi
 
