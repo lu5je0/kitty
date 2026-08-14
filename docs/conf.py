@@ -35,6 +35,7 @@ if kitty_src not in sys.path:
 from kitty.conf.types import Definition, expand_opt_references  # noqa
 from kitty.constants import str_version, website_url  # noqa
 from kitty.fast_data_types import DND_CODE, Shlex, TEXT_SIZE_CODE  # noqa
+import kitty.shaders.custom.demo as demo_module  # noqa
 
 # config {{{
 # -- Project information -----------------------------------------------------
@@ -66,7 +67,7 @@ extensions = [
     'sphinx.ext.githubpages',
     'sphinx.ext.extlinks',
     'sphinx_copybutton',
-    'sphinx_inline_tabs',
+    'sphinx_design',
     'sphinxext.opengraph',
 ]
 
@@ -97,7 +98,16 @@ language: str = 'en'
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path .
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'basic.rst', 'generated/cli-*.rst', 'generated/conf-*.rst', 'generated/actions.rst']
+exclude_patterns = [
+    '_build',
+    'Thumbs.db',
+    '.DS_Store',
+    'basic.rst',
+    'generated/cli-*.rst',
+    'generated/conf-*.rst',
+    'generated/actions.rst',
+    'generated/custom-shaders-*.rst',
+]
 
 rst_prolog = """
 .. |kitty| replace:: *kitty*
@@ -205,6 +215,8 @@ extlinks = {
     'iss': ('https://github.com/kovidgoyal/kitty/issues/%s', '#%s'),
     'pull': ('https://github.com/kovidgoyal/kitty/pull/%s', '#%s'),
     'disc': ('https://github.com/kovidgoyal/kitty/discussions/%s', '#%s'),
+    'repo_folder': ('https://github.com/kovidgoyal/kitty/tree/master/%s', '#%s'),
+    'repo_file': ('https://github.com/kovidgoyal/kitty/blob/master/%s', '#%s'),
 }
 
 
@@ -303,6 +315,50 @@ if you specify a program-to-run you can use the special placeholder
                 if kitten in ('panel', 'broadcast', 'remote_file'):
                     appname = 'kitty +' + appname
                 p('\n\n' + option_spec_as_rst(data['options'], message=data['help_text'], usage=data['usage'], appname=appname, heading_char='^'))
+
+
+# }}}
+
+
+def write_custom_shader_docs() -> None:  # {{{
+
+    category_slug_map = {
+        'cursor-trail': 'cursor-trails',
+        'background': 'backgrounds',
+        'mouse': 'mouse',
+    }
+
+    by_category: Dict[str, List[str]] = {}
+    for name, meta in demo_module.metadata.items():
+        cat_raw = str(meta.get('category', 'other'))
+        cat = category_slug_map.get(cat_raw, cat_raw)
+        by_category.setdefault(cat, []).append(name)
+
+    def shader_title(name: str) -> str:
+        if name.startswith('cursor-trail-'):
+            name = name[len('cursor-trail-') :]
+        return ' '.join(w.capitalize() for w in name.replace('-', ' ').split())
+
+    for category, shader_names in by_category.items():
+        lines: List[str] = []
+        a = lines.append
+        a('.. grid:: 1 2 2 3')
+        a('   :gutter: 3')
+        a('')
+        for shader_name in shader_names:
+            tagline = demo_module.metadata[shader_name]['tagline']
+            title = demo_module.metadata[shader_name].get('title', shader_title(shader_name))
+            a(f'   .. grid-item-card:: {title}')
+            a(f'      :link: https://download.calibre-ebook.com/videos/{shader_name}.webm')
+            a('      :class-card: shader-demo-card')
+            a('      :class-title: sd-text-primary sd-fs-4 sd-font-weight-bold')
+            a('')
+            a(f'      {tagline}')
+            a('')
+            a('')
+            a(f'      :small-dim:`{shader_name}`')
+        with open(f'generated/custom-shaders-{category}.rst', 'w') as f:
+            f.write('\n'.join(lines))
 
 
 # }}}
@@ -772,7 +828,7 @@ if building_man_pages:
     setup_man_pages()
 
 
-def build_finished(*a: Any, **kw: Any) -> None:
+def build_finished(app: Any, exception: Any) -> None:
     if building_man_pages:
         build_extra_man_pages()
 
@@ -785,6 +841,7 @@ def setup(app: Any) -> None:
     write_cli_docs(kn)
     write_remote_control_protocol_docs()
     write_color_names_table()
+    write_custom_shader_docs()
     write_conf_docs(app, kn)
     app.connect('source-read', replace_string)
     app.add_config_value('analytics_id', '', 'env')

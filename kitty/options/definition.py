@@ -457,7 +457,8 @@ trail animation only follows cursors that have stayed in their position for long
 than the specified number of milliseconds. This prevents trails from appearing
 for cursors that rapidly change their positions during UI updates in complex applications.
 See :opt:`cursor_trail_decay` to control the animation speed and :opt:`cursor_trail_start_threshold`
-to control when a cursor trail is started.
+to control when a cursor trail is started. You can also have different styles of trail by
+using the :opt:`custom_shaders` option, for example: :code:`custom_shaders cursor-trail-blaze`.
 """,
 )
 
@@ -1788,14 +1789,15 @@ opt(
     option_type='signed_unit_float',
     ctype='float',
     long_text="""
-Fade the text in inactive windows by the specified amount. This must be a
+Fade the content in inactive windows by the specified amount. This must be a
 number between -1 and 1. The absolute value controls the actual
 opacity, with zero being fully faded and one being fully opaque. When a positive number is
 used the text is faded even if only a single window is visible when the OS window
 is not focused. Negative numbers means that text is only faded when more than one kitty window
 is visible in an OS Window. Fading happens in all but the active window, even if the OS Window
 is not focused. Thus this is useful if you want to rely on the window manager to indicate OS Window focus
-and this feature to indicate which kitty window is active insidethe OS Window.
+and this feature to indicate which kitty window is active inside the OS Window. For alternate dimming/highlighting
+strategies, you can use :opt:`custom_shaders` for example: :code:`custom_shaders dim-inactive-windows`.
 """,
 )
 
@@ -2929,10 +2931,11 @@ opt(
     option_type='custom_shaders',
     add_to_default=False,
     long_text="""
-Space separated list of custom shader pipeline names. They will be loaded from
-the :file:`shaders` directory inside the kitty config directory or if not present there
-the builtin custom shaders that kitty ships with. Each name has :file:`.pipeline` append to it
-when searching for the file.
+Space separated list of custom shader pipeline names. If multiple names are specified they are
+loaded in order and concatenated. You can use shell syntax to quote or escape space characters.
+The exact loading algorithm is described in :ref:`custom_shader_load_order`.
+See :doc:`/custom-shaders` for details on how custom shaders work. For a quick demo, try setting
+this to :code:`inside-the-matrix`.
     """,
 )
 

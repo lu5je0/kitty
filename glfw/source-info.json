@@ -94,7 +94,9 @@
       "unstable/pointer-gestures/pointer-gestures-unstable-v1.xml",
       "unstable/xdg-output/xdg-output-unstable-v1.xml",
       "kwin-blur-v1.xml",
-      "wlr-layer-shell-unstable-v1.xml"
+      "wlr-layer-shell-unstable-v1.xml",
+      "wlr-virtual-pointer-unstable-v1.xml",
+      "virtual-keyboard-unstable-v1.xml"
     ],
     "sources": [
       "wl_init.c",
@@ -111,11 +113,12 @@
       "osmesa_context.c",
       "backend_utils.c",
       "linux_joystick.c",
+      "linux_notify.c",
+      "wl_titlebar_tabs.c",
       "linux_desktop_settings.c",
       "null_joystick.c",
       "momentum-scroll.c",
-      "linux_notify.c",
-      "wl_titlebar_tabs.c"
+      "wl_inject.c"
     ]
   },
   "wayland_protocols": [

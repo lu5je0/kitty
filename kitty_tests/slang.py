@@ -17,9 +17,11 @@ from kitty.shaders.slang import (
     build_custom_shader_pipeline_glsl,
     build_import_graph,
     clear_caches,
+    custom_shader,
     parse_pipeline_definition,
     parse_slang_text,
     parse_var_directive,
+    pipeline_definition,
     slangc_version,
     topological_layers,
     topological_sort,
@@ -148,6 +150,58 @@ import common;
 void vsMain() {}
 """,
             SlangFile('', '', frozenset({'common'}), frozenset({EntryPoint(Stage.vertex, 'vsMain')}), 'myshader'),
+        )
+
+        # Autoformat style: return type on its own line before function name
+        check(
+            """
+[shader("vertex")]
+VertexOutput
+vertex_main(uint vertex_id : SV_VertexID) {}
+""",
+            SlangFile('', '', frozenset(), frozenset({EntryPoint(Stage.vertex, 'vertex_main')})),
+        )
+
+        # Autoformat style: return type on own line, function name + open-paren on next, params on following lines
+        check(
+            """
+[shader("fragment")]
+float4
+fragment_main(
+    float2 texcoord : TEXCOORD
+) : SV_Target { return float4(0); }
+""",
+            SlangFile('', '', frozenset(), frozenset({EntryPoint(Stage.fragment, 'fragment_main')})),
+        )
+
+        # Autoformat style: attribute lines between [shader] and split return-type/name declaration
+        check(
+            """
+[shader("fragment")]
+[numthreads(1, 1, 1)]
+float4
+psMain() : SV_Target { return float4(1, 0, 0, 1); }
+""",
+            SlangFile('', '', frozenset(), frozenset({EntryPoint(Stage.fragment, 'psMain')})),
+        )
+
+        # Autoformat style: vertex and fragment both split across lines
+        check(
+            """
+[shader("vertex")]
+VertexOutput
+vsMain(uint id : SV_VertexID) {}
+
+[shader("fragment")]
+float4
+fsMain(VertexOutput vo) : SV_Target { return float4(0); }
+""",
+            SlangFile(
+                '',
+                '',
+                frozenset(),
+                frozenset({EntryPoint(Stage.vertex, 'vsMain'), EntryPoint(Stage.fragment, 'fsMain')}),
+            ),
         )
 
     def test_slang_ordering(self):
@@ -348,8 +402,10 @@ void vsMain() {}
             cache_base = local
         else:
             cache_base = tempfile.gettempdir()
+        cache_base = os.path.join(cache_base, 'kitty-test-cache')
+        os.makedirs(cache_base, exist_ok=True)
 
-        _CACHE_FILE = os.path.join(cache_base, 'kitty-custom-shaders-test.json')
+        _CACHE_FILE = os.path.join(cache_base, 'custom-shaders-test.json')
         if not shutil.which(slangc()[0]):
             self.skipTest(f'slangc ({slangc()[0]}) not found in PATH')
 
@@ -369,18 +425,16 @@ void vsMain() {}
             if entry.name.endswith('.slang') and entry.name[: -len('.slang')] not in _SUPPORT_SHADER_NAMES
         )
 
-        _CACHE_DIR = os.path.join(cache_base, 'kitty-custom-shaders-slangc-cache')
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        failures: list[str] = []
-        clear_caches()
-        try:
+        with tempfile.TemporaryDirectory() as cache_dir:
+            failures: list[str] = []
+            clear_caches()
             for name in shader_names:
                 pipeline = parse_pipeline_definition(
                     ['startgroup', f'shaders {name}', 'endgroup'],
                     name,
                 )
                 try:
-                    vert_src, frag_src, _ = build_custom_shader_pipeline_glsl(pipeline, cache_dir=_CACHE_DIR)
+                    vert_src, frag_src, _ = build_custom_shader_pipeline_glsl(pipeline, cache_dir=cache_dir)
                 except Exception as e:
                     failures.append(f'{name}: {e}')
                     continue
@@ -388,7 +442,6 @@ void vsMain() {}
                     failures.append(f'{name}: empty vertex GLSL')
                 if not frag_src:
                     failures.append(f'{name}: empty fragment GLSL')
-        finally:
             clear_caches()
 
         if failures:
@@ -396,3 +449,34 @@ void vsMain() {}
 
         with open(_CACHE_FILE, 'w') as f:
             json.dump({'hash': current_hash}, f)
+
+    def test_pipeline_absolute_path(self) -> None:
+        pipeline_content = 'startgroup\n    shaders myshader\nendgroup\n'
+        slang_content = b'// shader in pipeline dir\n'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline_path = os.path.join(tmpdir, 'my.pipeline')
+            with open(pipeline_path, 'w') as f:
+                f.write(pipeline_content)
+            with open(os.path.join(tmpdir, 'myshader.slang'), 'wb') as f:
+                f.write(slang_content)
+
+            clear_caches()
+            try:
+                # Absolute path with .pipeline extension - used as-is
+                lines, pipeline_dir = pipeline_definition(pipeline_path)
+                self.assertEqual(pipeline_dir, tmpdir)
+                self.assertIn('startgroup', lines)
+
+                # Absolute path without .pipeline extension - .pipeline is auto-appended
+                clear_caches()
+                lines2, pipeline_dir2 = pipeline_definition(pipeline_path[: -len('.pipeline')])
+                self.assertEqual(pipeline_dir2, tmpdir)
+                self.assertEqual(lines, lines2)
+
+                # Shader lookup finds the file in the pipeline directory first
+                found_path, import_dir, src, _ = custom_shader('myshader', tmpdir)
+                self.assertEqual(src, slang_content)
+                self.assertEqual(import_dir, tmpdir)
+            finally:
+                clear_caches()

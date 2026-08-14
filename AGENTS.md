@@ -226,9 +226,8 @@ map ctrl+b>i enable_ime
 
 ## 部署
 
-1. `./dev.sh build`
-2. `./deploy.sh` — 删除 `/Applications/kitty.app` 旧版，复制新版过去
-3. `open /Applications/kitty.app` 启动
+1. `./deploy.sh` — 内部先跑 `./dev.sh build`，再删除 `/Applications/kitty.app` 旧版、复制新版过去
+2. `open /Applications/kitty.app` 启动
 
 ## 用户配置（~/.dotfiles/kitty/）
 
