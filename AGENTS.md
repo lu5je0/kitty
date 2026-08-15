@@ -77,6 +77,7 @@
 - 左侧不画窗口 icon（曾画过，已移除，`_glfwPlatformSetWindowIcon` 的钩子行也删了）；tab 从 `TAB_BAR_LEFT_MARGIN`（8×7/6 逻辑 px，左侧没有红绿灯按钮所以比 macOS 的 16 小）开始。
 - mutter 默认 SSD：`glfwWaylandSetTitlebarTabs` 里检测 `decs.serverSide` 时强制切 CLIENT_SIDE（照抄 `setXdgDecorations` 的 titlebar_hidden 分支）。
 - **mutter 焦点重绘时序 bug**（现象：非拖动时阴影是未聚焦的半透明、tab 是灰色未聚焦配色）：CSD 的焦点相关绘制读 `_glfw.focusedWindowId`（键盘焦点），但上游重绘只由 xdg configure(activated) 触发；mutter 先发 configure 再发 `wl_keyboard.enter`，重绘时键盘焦点还没更新，之后也没人再触发。修法：`glfw/wl_init.c` 的 `keyboardHandleEnter/Leave` 里 `_glfwInputWindowFocus` 之后各插 1 行 `csd_change_title(window)`（内部按 focus_changed 去重；sync 的阴影 subsurface 靠焦点变化本身引发的下一次父 surface 提交生效）。合并冲突时这两行要保留。
+- **拖动 tab 栏移动窗口时 bar 变色**（上一条的后遗症）：`xdg_toplevel_move` 期间 mutter 会做键盘抓取，`_glfw.focusedWindowId` 掉 0（xdg toplevel 的 ACTIVATED 一直在），而上面那两行 hook 会立刻按未聚焦配色重绘，于是整条 bar 在拖动中变色。修法：`wl_titlebar_tabs.c` 新增 fork-local 的 `bar_is_focused()`（键盘焦点 **或** `TOPLEVEL_STATE_ACTIVATED`），`render_bar` 和 `anim_ring_paint` 都改用它。上游的阴影和 corner patch 故意仍跟键盘焦点走（不动上游行，保持纯新增；阴影在拖动中变淡属可接受）。
 - 所有 tab 几何都存 **scaled px**（`round(fscale*x)` 命中），分数缩放下勿混逻辑坐标。
 - 文字/动作回调经 `_glfw.callbacks`（glfw 是独立 .so，不能直接调 kitty 函数）。
 - 合并主干时 `glfw/wl_client_side_decorations.c` 的 7 处钩子要保留（6 处单行 + `buffer_release_event()` 开头 2 行的 buffer 保留早退）；`glfw/glfw3.h` 的 typedef 块和末尾两个 GLFWAPI 声明要保留。

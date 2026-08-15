@@ -1046,6 +1046,15 @@ tabs_left_margin(double fscale) {
     return (int)round(TAB_BAR_LEFT_MARGIN * fscale);
 }
 
+// mutter takes a keyboard grab for the duration of an interactive move, so the
+// keyboard focus drops while the user drags the bar and the fork's repaint on
+// keyboard leave (wl_init.c) recolours the bar mid-drag. The toplevel keeps
+// TOPLEVEL_STATE_ACTIVATED throughout, so that is the signal for bar colours.
+static bool
+bar_is_focused(_GLFWwindow *window) {
+    return window->id == _glfw.focusedWindowId || (window->wl.current.toplevel_states & TOPLEVEL_STATE_ACTIVATED);
+}
+
 void
 wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_bg, uint32_t fg, uint32_t hover_bg UNUSED, bool is_dark) {
     WaylandTabBarState *s = state_for_window(window->id, false);
@@ -1078,7 +1087,7 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     const bool forced = s->forced_appearance && !decs.use_custom_titlebar_color;
     if (forced || !decs.use_custom_titlebar_color) {
         const bool dark = forced ? s->forced_appearance == 2 : is_dark;
-        const bool is_focused = window->id == _glfw.focusedWindowId;
+        const bool is_focused = bar_is_focused(window);
         if (dark) { bar_bg = is_focused ? 0x393A39 : 0x2C2C2C; fg = is_focused ? 0xffffff : 0xcccccc; }
         else { bar_bg = is_focused ? 0xECECEC : 0xF6F6F6; fg = is_focused ? 0x444444 : 0x888888; }
     }
@@ -1241,7 +1250,7 @@ anim_ring_paint(_GLFWwindow *window, WaylandTabBarState *s) {
     if (!ensure_anim_ring(window, s)) return false;
     const int slot = !s->anim_ring.busy[0] ? 0 : (!s->anim_ring.busy[1] ? 1 : -1);
     if (slot < 0) return false;
-    const bool is_focused = window->id == _glfw.focusedWindowId;
+    const bool is_focused = bar_is_focused(window);
     uint32_t bg = is_focused ? 0xffdddad6 : 0xffeeeeee, fg = is_focused ? 0xff444444 : 0xff888888;
     bool is_dark = false;
     GLFWColorScheme appearance = glfwGetCurrentSystemColorTheme(false);
