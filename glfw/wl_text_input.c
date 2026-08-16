@@ -24,6 +24,31 @@ uint32_t commit_serial = 0;
 // never send zwp_text_input_v3_enable. Set via glfwWaylandSetIMEInhibited below.
 static bool fork_ime_inhibited = false;
 
+// fork-local: zwp_text_input_v3_enable/disable reset *all* compositor side state,
+// including the cursor rectangle, while the GLFW_IME_UPDATE_CURSOR_POSITION handler
+// below de-duplicates against last_cursor_*. So any enable that happens after the
+// rectangle was cached (kitty window/pane focus change, the per-window IME disable
+// being lifted when nvim enters insert mode, text-input enter racing wl_keyboard.enter)
+// leaves the compositor with no rectangle at all: the de-duplication suppresses the
+// re-send, and during composition the reported rectangle does not change (by design,
+// see prepare_ime_position_update_event), so the whole first candidate popup is drawn
+// at the top left corner of the window and only later compositions are placed right.
+// Track whether the compositor still holds our rectangle. Wrapping the generated
+// request functions keeps every upstream call site untouched (the inner call is not
+// re-expanded inside the macro body).
+static bool fork_cursor_rect_synced = false;
+#define zwp_text_input_v3_enable(ti) (fork_cursor_rect_synced = false, zwp_text_input_v3_enable(ti))
+#define zwp_text_input_v3_disable(ti) (fork_cursor_rect_synced = false, zwp_text_input_v3_disable(ti))
+#define zwp_text_input_v3_set_cursor_rectangle(ti, x, y, w, h) (fork_cursor_rect_synced = true, zwp_text_input_v3_set_cursor_rectangle(ti, x, y, w, h))
+
+// fork-local: re-send the cached rectangle after an enable dropped the compositor's copy.
+static void
+fork_ime_resend_cursor_rectangle(void) {
+    if (text_input && last_cursor_width > 0) {
+        zwp_text_input_v3_set_cursor_rectangle(text_input, last_cursor_left, last_cursor_top, last_cursor_width, last_cursor_height);
+    }
+}
+
 static void
 commit(void) {
     if (text_input) {
@@ -175,6 +200,7 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
             if (ime_focused) {
                 zwp_text_input_v3_enable(text_input);
                 zwp_text_input_v3_set_content_type(text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE, ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL);
+                fork_ime_resend_cursor_rectangle();  // fork-local: the enable above reset it, mirrors text_input_enter
             } else {
                 free(pending_pre_edit);
                 pending_pre_edit = NULL;
@@ -197,6 +223,9 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
 #define s(x) (int)round((x) / scale)
             const int left = s(ev->cursor.left), top = s(ev->cursor.top), width = s(ev->cursor.width), height = s(ev->cursor.height);
 #undef s
+            // fork-local: an enable/disable since the last push dropped the compositor's copy
+            // of the rectangle, so defeat the de-duplication below and push it again.
+            if (!fork_cursor_rect_synced) last_cursor_width = 0;
             if (left != last_cursor_left || top != last_cursor_top || width != last_cursor_width || height != last_cursor_height) {
                 last_cursor_left = left;
                 last_cursor_top = top;
