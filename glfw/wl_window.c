@@ -3113,7 +3113,7 @@ map_drag_toplevel(void) {
         wl_surface_attach(_glfw.wl.drag.drag_icon, buf, 0, 0);
         wl_surface_damage(_glfw.wl.drag.drag_icon, 0, 0, INT32_MAX, INT32_MAX);
         _glfw.wl.drag.toplevel_buffer = NULL;
-        debug_input("Drag toplevel icon buffer attached\n");
+        debug_input("Drag toplevel icon buffer attached: %p\n", (void*)buf);
     }
     if (_glfw.wl.drag.drag_icon) wl_surface_commit(_glfw.wl.drag.drag_icon);
     if (buf) wl_buffer_destroy(buf);
@@ -3141,7 +3141,7 @@ static const struct xdg_surface_listener drag_toplevel_xdg_surface_listener = {
 };
 
 static void
-drag_toplevel_configure(void *data UNUSED, struct xdg_toplevel *toplevel UNUSED, int32_t width UNUSED, int32_t height UNUSED, struct wl_array *states UNUSED) {}
+drag_toplevel_configure(void *data UNUSED, struct xdg_toplevel *toplevel UNUSED, int32_t width, int32_t height, struct wl_array *states UNUSED) { debug_input("Drag toplevel configure: %dx%d\n", width, height); }
 static void
 drag_toplevel_close(void *data UNUSED, struct xdg_toplevel *toplevel UNUSED) {}
 #ifdef XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION
@@ -3181,6 +3181,8 @@ _glfwWaylandConfirmDragSession(void) {
     if (!_glfw.wl.drag.source || _glfw.wl.drag.session_confirmed) return;
     _glfw.wl.drag.session_confirmed = true;
     debug_input("Drag session confirmed as started by compositor\n");
+    // fork: a titlebar tab drag handed off to DND must drop its in-client ghost
+    wl_titlebar_tabs_dnd_started(_glfwWindowForId(_glfw.drag.window_id));
     if (_glfw.wl.drag.toplevel_map_deferred) {
         _glfw.wl.drag.toplevel_map_deferred = false;
         map_drag_toplevel();
@@ -3406,6 +3408,7 @@ _glfwPlatformChangeDragImage(const GLFWimage *thumbnail) {
     if (!thumbnail || !thumbnail->pixels) return 0;
     struct wl_buffer *icon_buffer = createShmBuffer(thumbnail, false, true);
     if (!icon_buffer) return ENOMEM;
+    debug_input("ChangeDragImage: %dx%d icon=%p pending=%p\n", thumbnail->width, thumbnail->height, (void*)icon_buffer, (void*)_glfw.wl.drag.toplevel_buffer);
     _GLFWwindow *window = _glfwWindowForId(_glfw.drag.window_id);
     if (_glfw.wl.drag.drag_viewport) {
         double f_scale = window ? _glfwWaylandWindowScale(window) : 1.0;
@@ -3416,10 +3419,20 @@ _glfwPlatformChangeDragImage(const GLFWimage *thumbnail) {
         int scale = window ? _glfwWaylandIntegerWindowScale(window) : 1;
         wl_surface_set_buffer_scale(_glfw.wl.drag.drag_icon, scale);
     }
-    wl_surface_attach(_glfw.wl.drag.drag_icon, icon_buffer, 0, 0);
-    wl_surface_damage(_glfw.wl.drag.drag_icon, 0, 0, INT32_MAX, INT32_MAX);
+    if (_glfw.wl.drag.toplevel_buffer) {
+        // The initial drag toplevel map (map_drag_toplevel() on the first xdg
+        // configure) has not run yet and attaches toplevel_buffer, so attaching
+        // the new image directly would be overwritten by the stale initial
+        // thumbnail: swap the pending buffer instead.
+        wl_buffer_destroy(_glfw.wl.drag.toplevel_buffer);
+        _glfw.wl.drag.toplevel_buffer = icon_buffer;
+        icon_buffer = NULL;
+    } else {
+        wl_surface_attach(_glfw.wl.drag.drag_icon, icon_buffer, 0, 0);
+        wl_surface_damage(_glfw.wl.drag.drag_icon, 0, 0, INT32_MAX, INT32_MAX);
+    }
     wl_surface_commit(_glfw.wl.drag.drag_icon);
-    wl_buffer_destroy(icon_buffer);
+    if (icon_buffer) wl_buffer_destroy(icon_buffer);
     return 0;
 }
 
@@ -3634,6 +3647,7 @@ _glfwPlatformStartDrag(_GLFWwindow *window, const GLFWimage *thumbnail) {
             xdg_toplevel_add_listener(_glfw.wl.drag.toplevel_xdg_toplevel, &drag_toplevel_listener, NULL);
             _glfw.wl.drag.toplevel_buffer = icon_buffer;
             icon_buffer = NULL;
+            debug_input("Drag toplevel initial buffer: %p\n", (void*)_glfw.wl.drag.toplevel_buffer);
             // Initial empty commit triggers the xdg_surface configure event.
             wl_surface_commit(_glfw.wl.drag.drag_icon);
         } else {

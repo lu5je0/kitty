@@ -1958,6 +1958,14 @@ class TabManager:  # {{{
                     bg = color_as_int(opts.inactive_tab_background)
                 title_pixels, width = draw_single_line_of_text(self.os_window_id, title, 0xFF000000 | fg, 0xFF000000 | bg, width)
                 title_height = len(title_pixels) // (width * 4)
+                # fork: the GL framebuffer's alpha channel is meaningless for
+                # terminal content (0 where nothing was blended), but the
+                # Wayland DND thumbnail premultiplies by it, making the content
+                # transparent: force the screenshot opaque.
+                if len(pixels) >= 4:
+                    _pb = bytearray(pixels)
+                    _pb[3::4] = b'\xff' * (len(_pb) // 4)
+                    pixels = bytes(_pb)
                 thumbnails = ((title_pixels, width, title_height), (title_pixels + pixels, width, title_height + height))
                 drag_data = {
                     f'application/net.kovidgoyal.kitty-tab-{os.getpid()}': str(tab.id).encode(),

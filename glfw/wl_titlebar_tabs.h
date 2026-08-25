@@ -45,3 +45,8 @@ void wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window);
 // them instead of letting buffer_release_event destroy them (which would force
 // a full CSD buffer rebuild on the next redraw). Hooked in buffer_release_event.
 bool wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer);
+// The compositor accepted a DND session for a torn-off tab drag and took the
+// pointer over: end the in-client drag (its ghost can no longer follow the
+// cursor and the bar must return to its normal layout). Called from
+// _glfwWaylandConfirmDragSession() in wl_window.c.
+void wl_titlebar_tabs_dnd_started(_GLFWwindow *window);

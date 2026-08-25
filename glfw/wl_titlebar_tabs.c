@@ -1763,13 +1763,22 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
     // breathing room, mirroring the macOS look. Metrics feed all the CSD
     // geometry calculations, so just updating them and forcing a rebuild is
     // enough.
-    if (s->count > 0 && decs.metrics.visible_titlebar_height != TABS_TITLEBAR_HEIGHT) {
+    // kwin rasterizes the titlebar subsurface and the main surface at
+    // independently rounded physical heights; when frac(vth*scale) < 0.5 the
+    // two roundings can sum to one physical pixel less than the docked area,
+    // leaving a wallpaper sliver below maximized windows. Nudge the logical
+    // height up 1 in that case so the titlebar rounding goes up (a 1px
+    // overshoot hides behind the panel, a 1px shortfall would not).
+    const double tb_scaled = TABS_TITLEBAR_HEIGHT * _glfwWaylandWindowScale(window);
+    const double tb_frac = tb_scaled - floor(tb_scaled);
+    const int vth = TABS_TITLEBAR_HEIGHT + ((tb_frac > 0.001 && tb_frac < 0.5) ? 1 : 0);
+    if (s->count > 0 && decs.metrics.visible_titlebar_height != (unsigned int)vth) {
         // wider shadow margin for the Chrome-style drop shadow (the
         // interactive resize border stays 12px, see restrict_shadow_input_regions)
         decs.metrics.width = SHADOW_MARGIN;
         decs.metrics.horizontal = 2 * decs.metrics.width;
-        decs.metrics.top = decs.metrics.width + TABS_TITLEBAR_HEIGHT;
-        decs.metrics.visible_titlebar_height = TABS_TITLEBAR_HEIGHT;
+        decs.metrics.top = decs.metrics.width + vth;
+        decs.metrics.visible_titlebar_height = vth;
         decs.metrics.vertical = decs.metrics.width + decs.metrics.top;
         decs.for_window_state.width = 0;  // force ensure_csd_resources() to rebuild buffers
     }
@@ -1812,4 +1821,19 @@ wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *b
     Q(shadow_upper_left); Q(shadow_upper_right); Q(shadow_lower_left); Q(shadow_lower_right);
 #undef Q
     return false;
+}
+
+void
+wl_titlebar_tabs_dnd_started(_GLFWwindow *window) {
+    if (!window) return;
+    WaylandTabBarState *s = state_for_window(window->id, false);
+    if (!s || !s->dragging || s->pressed_on != PRESS_TAB) return;
+    TABS_DEBUG("dnd session took the pointer: ending in-client tab drag");
+    s->dragging = false;
+    s->drag_out = false;
+    s->pressed_on = PRESS_NONE;
+    destroy_drag_ghost(s);
+    decs.titlebar_needs_update = true;
+    csd_change_title(window);
+    if (!window->wl.waiting_for_swap_to_commit) wl_surface_commit(window->wl.surface);
 }
