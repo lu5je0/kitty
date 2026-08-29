@@ -66,7 +66,7 @@ tabs_debug_enabled(void) {
 // @2x) is 28: 1px light border overlaying the bar top + 1px bar + 24px tab
 // + 2px bar; 28 * PT_PARITY rounds to 33.
 #define TABS_TITLEBAR_HEIGHT 33
-#define WINDOW_TOP_CORNER_RADIUS 10.
+#define WINDOW_TOP_CORNER_RADIUS 8.
 // macOS-style light inner window border, 1 logical px. Measured from
 // macos.png: top edge white@~0.30 over the bar, sides/bottom white@~0.20.
 #define BORDER_TOP_ALPHA 0.30

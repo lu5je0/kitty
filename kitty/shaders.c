@@ -2399,7 +2399,7 @@ draw_bottom_corner_masks(OSWindow *os_window) {
     double xdpi, ydpi; float xscale, yscale;
     get_os_window_content_scale(os_window, &xdpi, &ydpi, &xscale, &yscale);
     // radius must match WINDOW_TOP_CORNER_RADIUS in glfw/wl_titlebar_tabs.c
-    const GLsizei r = (GLsizei)(10.f * xscale + 0.5f);
+    const GLsizei r = (GLsizei)(8.f * xscale + 0.5f);
     const GLsizei w = os_window->viewport_width, h = os_window->viewport_height;
     if (r <= 0 || w < 2 * r || h < r) return;
     bind_program(CORNER_MASK_PROGRAM);
