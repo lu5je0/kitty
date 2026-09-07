@@ -849,6 +849,11 @@ def fixup_opengl_code(glsl_code: str, shader_name: str, existing_metadata: GLSLM
         lambda m: f'{m.group(1)} {m.group(2)} = {m.group(1)}({m.group(3)})',
         ans,
     )
+    ans = re.sub(
+        r'\b(const\s+)?([A-Za-z_]\w*)\s+(\w+)\s*(\[[^]]+\])\s*=\s*\{([^}]*)\}',
+        lambda m: f'{m.group(1) or ""}{m.group(2)} {m.group(3)}{m.group(4)} = {m.group(2)}[]({m.group(5)})',
+        ans,
+    )
     m = GLSLMetadata()
     m.loose_uniforms = uniform_names
     m.uniform_structs = uniform_structs
