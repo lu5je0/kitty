@@ -53,6 +53,7 @@
 | `kitty/shaders.c` | 枚举加 `CORNER_MASK_PROGRAM`、`C()` 导出 1 行、新 static `draw_bottom_corner_masks()`（帧末把底部两角像素乘以圆覆盖率，`GL_ZERO/GL_SRC_ALPHA`；同函数里还画内容区的 1px 浅色内描边：左右/底边 + 底角弧）+ `stop_os_window_rendering()` 末尾 1 行调用 |
 | `kitty/corner_mask_fragment.glsl` | **新文件，纯 fork 专属**：circle SDF coverage + `border_color` 描边模式，复用 `rounded_rect_vertex.glsl` |
 | `kitty/shaders.py` | import + 1 行编译 `corner_mask` program |
+| `kitty/shaders/slang.py` | 内存 shader 先写入临时 `.slang` 文件再编译，兼容只接受普通输入文件的 Nix `shader-slang`；顶点与片段仍并行编译 |
 | `kitty/state.h` | `OSWindow` 尾部单独一行 `bool wayland_titlebar_tabs_active;` |
 | `glfw/glfw3.h` | preamble 加 `GLFWTitlebarTab`/`GLFWTitlebarTabAction`/两个回调 typedef（`} GLFWgamepadstate;` 之后）；GLFWAPI 声明区末尾加 `glfwSetTitlebarTab{Action,Text}Callback` |
 | `glfw/internal.h` | `_glfw.callbacks` 尾部加 `titlebar_tab_action` / `titlebar_tab_text` 两行 |
