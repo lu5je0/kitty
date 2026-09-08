@@ -39,7 +39,7 @@
 | `kitty/options/definition.py` | 新增 `native_titlebar_tabs` 选项（Python-only，无 ctype）+ `macos_titlebar_tabs` deprecation alias |
 | `kitty/options/utils.py` | 文件末尾追加 `deprecated_macos_titlebar_tabs_alias()` |
 | `kitty/options/parse.py`、`kitty/options/types.py` | 生成文件，由 `kitty +launch gen config` 重新生成，勿手改 |
-| `kitty/cocoa_window.m` | macOS 核心实现（"Titlebar tab bar" 折叠段，约 400 行）：`KittyTitlebarTabView`、`KittyTitlebarNewTabButton`、`KittyTitlebarTabBarView` 三个类 + `cocoa_update_titlebar_tabs()` 入口。含动画、hover 校准（防 tracking area 失效导致 hover 卡住）、`titlebarSeparatorStyle = None` 去除标题栏底部分隔线阴影 |
+| `kitty/cocoa_window.m` | macOS 核心实现（"Titlebar tab bar" 折叠段，约 400 行）：`KittyTitlebarTabView`、`KittyTitlebarNewTabButton`、`KittyTitlebarTabBarView` 三个类 + `cocoa_update_titlebar_tabs()` 入口。含动画、hover 校准、`titlebarSeparatorStyle = None` 去除标题栏底部分隔线阴影。hover 校准 = `resyncHoverStates()`（按鼠标真实位置重算 tabs 与 + 按钮的 hovered，拖拽会话期间跳过），在布局主函数 `layoutTabsAnimated:...draggedTab:dragIndex:` 末尾统一调用（tab 更新/窗口 resize/拖拽落位全覆盖）。原因：view 在静止鼠标底下移动时 AppKit 重注册 tracking area 会吞掉 mouseExited，+ 按钮曾因此卡住高亮 |
 | `kitty/cocoa_window.h` | `TitlebarTabInfo` 结构、五个新 `CocoaPendingAction` 枚举、函数声明 |
 | `kitty/glfw.c` | Python API `set_titlebar_tabs`（`NativeTabInfo` 宏共享 macOS/Wayland 解析循环）+ 注册到 module_methods；`titlebar_tab_text_callback` / `titlebar_tab_action_callback`（非 Apple 分支，在 `glfw_init` 里和 `glfwSetDrawTextFunction` 一起注册）；Wayland 分支透传 `forced_appearance`（`macos_titlebar_color` light/dark）并置 `w->wayland_titlebar_tabs_active`（底部圆角开关） |
 | `kitty/child-monitor.c` | `process_cocoa_pending_actions` 中五个新 action 的 `call_boss` 转发 |
