@@ -2405,42 +2405,73 @@ draw_bottom_corner_masks(OSWindow *os_window) {
     bind_program(CORNER_MASK_PROGRAM);
     const GLint rect_loc = program_uniform_location(CORNER_MASK_PROGRAM, "rect");
     const GLint border_loc = program_uniform_location(CORNER_MASK_PROGRAM, "border_color");
-    glUniform4f(border_loc, 0.f, 0.f, 0.f, 0.f);  // cut mode
     glEnable(GL_BLEND);
-    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);  // dst *= coverage
-    // bottom-left corner; circle centers are in framebuffer coords (origin bottom-left)
-    glUniform4f(rect_loc, (float)r, (float)r, (float)r, 0.f);
+    // macOS-style window edge (macos.png @2x): 1 physical px near-black
+    // hairline at the very edge, then the 1 logical px light stroke
+    // white@0.20 inset behind it (the top edge and titlebar sides are drawn
+    // in the CSD buffer by wl_titlebar_tabs.c). The strokes go down first and
+    // the corner cut runs last, so the cut's fade attenuates them the same way
+    // round_top_corners() does for the titlebar half of the frame.
+    GLsizei bw = (GLsizei)(xscale + 0.5f);
+    if (bw < 1) bw = 1;
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    // dark outer hairline
+    glUniform4f(border_loc, 0.f, 0.f, 0.f, 1.f);  // premultiplied black
+    glUniform4f(rect_loc, 0.f, 0.f, 0.f, 1.f);  // solid mode
+    save_viewport_using_top_left_origin(0, 0, 1, h - r, h);  // left edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(w - 1, 0, 1, h - r, h);  // right edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    save_viewport_using_top_left_origin(r, h - 1, w - 2 * r, 1, h);  // bottom edge
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // bottom corner hairline arcs, band [r - 1, r]
+    glUniform4f(rect_loc, (float)r, (float)r, (float)r, 1.f);
     save_viewport_using_top_left_origin(0, h - r, r, r, h);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    // bottom-right corner
-    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, 0.f);
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, 1.f);
     save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    // macOS-style light inner window border, 1 logical px white@0.20 (the top
-    // edge and titlebar sides are drawn in the CSD buffer by wl_titlebar_tabs.c)
-    GLsizei bw = (GLsizei)(xscale + 0.5f);
-    if (bw < 1) bw = 1;
+    // light stroke inset behind the hairline
     const float ba = 0.20f;
     glUniform4f(border_loc, ba, ba, ba, ba);  // premultiplied white
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glUniform4f(rect_loc, 0.f, 0.f, 0.f, (float)bw);  // solid mode
-    save_viewport_using_top_left_origin(0, 0, bw, h - r, h);  // left edge
+    save_viewport_using_top_left_origin(1, 0, bw, h - r, h);  // left edge
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    save_viewport_using_top_left_origin(w - bw, 0, bw, h - r, h);  // right edge
+    save_viewport_using_top_left_origin(w - 1 - bw, 0, bw, h - r, h);  // right edge
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    save_viewport_using_top_left_origin(r, h - bw, w - 2 * r, bw, h);  // bottom edge
+    save_viewport_using_top_left_origin(r, h - 1 - bw, w - 2 * r, bw, h);  // bottom edge
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    // bottom corner arcs
-    glUniform4f(rect_loc, (float)r, (float)r, (float)r, (float)bw);
+    // bottom corner arcs, band [r - 1 - bw, r - 1]: same width and flat alpha
+    // as the straight edges (macos.png content area reads {81, 81} = 0.20)
+    glUniform4f(rect_loc, (float)r, (float)r, (float)(r - 1), (float)bw);
     save_viewport_using_top_left_origin(0, h - r, r, r, h);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();
-    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, (float)bw);
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)(r - 1), (float)bw);
+    save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    // finally cut the two bottom corners, fading over the same width as
+    // WINDOW_CORNER_FEATHER in glfw/wl_titlebar_tabs.c so both halves of the
+    // frame have the same silhouette and the strokes above read grey along the
+    // arc rather than staying solid
+    const float feather = 1.5f * xscale;
+    glUniform4f(border_loc, 0.f, 0.f, 0.f, 0.f);  // cut mode
+    glBlendFunc(GL_ZERO, GL_SRC_ALPHA);  // dst *= coverage
+    // circle centers are in framebuffer coords (origin bottom-left)
+    glUniform4f(rect_loc, (float)r, (float)r, (float)r, feather);
+    save_viewport_using_top_left_origin(0, h - r, r, r, h);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    restore_viewport();
+    glUniform4f(rect_loc, (float)(w - r), (float)r, (float)r, feather);
     save_viewport_using_top_left_origin(w - r, h - r, r, r, h);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     restore_viewport();

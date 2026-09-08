@@ -96,6 +96,7 @@ from .fast_data_types import (
     focus_os_window,
     get_boss,
     get_options,
+    get_os_window_pos,
     get_os_window_size,
     get_tab_being_dragged,
     get_window_being_dragged,
@@ -3656,7 +3657,9 @@ class Boss:
             return
         with self.suppress_focus_change_events():
             if target_os_window_id == 'new':
-                target_os_window_id = self.add_os_window()
+                # fork: offset the detached window so it does not cover its source
+                x, y = self._position_for_detached_window(src_tab.os_window_id)
+                target_os_window_id = self.add_os_window(x=x, y=y)
                 tm = self.os_window_map[target_os_window_id]
                 target_tab = tm.new_tab(empty_tab=True)
             else:
@@ -3722,12 +3725,36 @@ class Boss:
             layout.insert_window_next_to(src_tab.windows, window, dest_window, horizontal, after)
             src_tab.relayout()
 
-    def _move_tab_to(self, tab: Tab | None = None, target_os_window_id: int | None = None) -> Tab | None:
+    def _position_for_detached_window(self, source_os_window_id: int) -> tuple[int | None, int | None]:
+        # fork: position a detached tab/window offset from its source window so
+        # that the new OS window does not completely cover the source one.
+        # There is no way for a client to set window positions on Wayland, so
+        # leave placement to the compositor there.
+        if is_wayland():
+            return None, None
+        try:
+            x, y = get_os_window_pos(source_os_window_id)
+        except Exception:
+            return None, None
+        x += 40
+        y += 40
+        # keep the new window's top left corner inside the work area of the
+        # monitor containing it
+        for mx, my, mw, mh in glfw_get_monitor_workarea():
+            if mx <= x < mx + mw and my <= y < my + mh:
+                x = max(mx, min(x, mx + mw - 128))
+                y = max(my, min(y, my + mh - 128))
+                break
+        return x, y
+
+    def _move_tab_to(self, tab: Tab | None = None, target_os_window_id: int | None = None, x: int | None = None, y: int | None = None) -> Tab | None:
         tab = tab or self.active_tab
         if tab is None:
             return None
         if target_os_window_id is None:
-            target_os_window_id = self.add_os_window()
+            if x is None and y is None:
+                x, y = self._position_for_detached_window(tab.os_window_id)
+            target_os_window_id = self.add_os_window(x=x, y=y)
         tm = self.os_window_map[target_os_window_id]
         target_tab = tm.new_tab(empty_tab=True)
         target_tab.take_over_from(tab)

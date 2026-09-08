@@ -67,9 +67,20 @@ tabs_debug_enabled(void) {
 // + 2px bar; 28 * PT_PARITY rounds to 33.
 #define TABS_TITLEBAR_HEIGHT 33
 #define WINDOW_TOP_CORNER_RADIUS 10.
+// macOS fades the window edge out over ~1.5 logical px at the corners instead
+// of the hard 1px area-coverage edge a plain rasteriser gives. Measured on the
+// arc (light desktop behind): the dark hairline's darkest pixel reads ~82 on
+// macOS but ~25 with a hard edge -- the fade eats the hairline's outer half,
+// which is what makes the black border read grey through the arc.
+#define WINDOW_CORNER_FEATHER 1.5
 // macOS-style light inner window border, 1 logical px. Measured from
-// macos.png: top edge white@~0.30 over the bar, sides/bottom white@~0.20.
-#define BORDER_TOP_ALPHA 0.30
+// macos.png @2x (outer->inner physical rows, over the bar bg 58): top edge
+// {129, 113} = {0.36, 0.28}, side columns flat {81, 81} = 0.20. The corner
+// arcs are the same width as the straight strokes and their alpha rotates
+// from the top values where the arc meets the top edge to the flat side
+// value where it meets the side column.
+#define BORDER_TOP_ALPHA_OUT 0.36
+#define BORDER_TOP_ALPHA_IN 0.28
 #define BORDER_SIDE_ALPHA 0.20
 #define ATTENTION_COLOR 0xff9500u  // approximation of NSColor.systemOrange
 // compact window buttons (KDE-like size, drawn by us since the upstream ones
@@ -844,9 +855,11 @@ render_plus_button(WaylandTabBarState *s, Canvas *bar, uint32_t bar_bg, double f
 
 // Cut the two top corners of the bar with premultiplied transparency so the
 // window gets macOS-style rounded top corners (shm ARGB8888 is premultiplied).
+// The edge fades over `feather` px centred on the radius rather than stopping
+// at a hard 1px area-coverage boundary; see WINDOW_CORNER_FEATHER.
 static void
-round_top_corners(Canvas *bar, double r) {
-    const int ir = (int)ceil(r);
+round_top_corners(Canvas *bar, double r, double feather) {
+    const int ir = (int)ceil(r + feather / 2);
     for (int y = 0; y < ir && y < bar->height; y++) {
         uint32_t *row = bar->px + (size_t)y * bar->width;
         for (int i = 0; i < ir; i++) {
@@ -855,8 +868,10 @@ round_top_corners(Canvas *bar, double r) {
                 const int x = xs[k];
                 if (x < 0 || x >= bar->width) continue;
                 const double cx = k == 0 ? r : bar->width - r, cy = r;
-                const double cov = circle_coverage(x, y, cx, cy, r);
+                const double dist = hypot(cx - (x + 0.5), cy - (y + 0.5));
+                double cov = feather > 0 ? 0.5 + (r - dist) / feather : (dist <= r ? 1. : 0.);
                 if (cov >= 1) continue;
+                if (cov < 0) cov = 0;
                 uint32_t p = row[x];
                 const uint32_t a = (uint32_t)(((p >> 24) & 0xff) * cov + 0.5);
                 const uint32_t rr = (uint32_t)(((p >> 16) & 0xff) * cov + 0.5);
@@ -868,26 +883,60 @@ round_top_corners(Canvas *bar, double r) {
     }
 }
 
-// macOS-style 1 logical px light inner border on the titlebar part of the
-// window: straight top edge, the two top corner arcs, and the side columns.
-// Drawn before round_top_corners(); the arc stroke lies inside the boundary
+// macOS-style window edge on the titlebar part of the window: macos.png @2x
+// shows a 1 physical px near-black hairline at the very edge with a ~1 logical
+// px light stroke (top white@0.30, sides white@0.20) inset behind it: straight
+// top edge, the two top corner arcs, and the side columns.
+// Drawn before round_top_corners(); the arc strokes lie inside the boundary
 // the cut trims along, so the two compose cleanly.
 static void
 draw_titlebar_border(Canvas *bar, double r, double fscale) {
     const double bw = fmax(1., round(fscale));
+    const int ow = 1;  // dark outer hairline, physical px (macos.png @2x: 1)
     const int ir = (int)ceil(r), ibw = (int)ceil(bw);
-    // straight top edge between the arcs
-    for (int y = 0; y < ibw && y < bar->height; y++) {
+    // dark outer hairline: straight top edge between the arcs
+    for (int y = 0; y < ow && y < bar->height; y++) {
         uint32_t *row = bar->px + (size_t)y * bar->width;
-        const double cov = fmin(1., bw - y);
         for (int x = ir; x < bar->width - ir; x++)
-            row[x] = blend_argb(row[x], 0xffffffffu, cov * BORDER_TOP_ALPHA);
+            row[x] = blend_argb(row[x], 0x000000u, 1.);
     }
-    // side columns below the arcs
+    // dark outer hairline: side columns below the arcs
     for (int y = ir; y < bar->height; y++) {
         uint32_t *row = bar->px + (size_t)y * bar->width;
-        for (int i = 0; i < ibw; i++) {
-            const double cov = fmin(1., bw - i);
+        const int xs[2] = {0, bar->width - 1};
+        for (int k = 0; k < 2; k++) {
+            if (xs[k] < 0 || xs[k] >= bar->width) continue;
+            row[xs[k]] = blend_argb(row[xs[k]], 0x000000u, 1.);
+        }
+    }
+    // dark outer hairline: top corner arcs, stroke band [r - ow, r]
+    for (int y = 0; y < ir && y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        for (int i = 0; i < ir; i++) {
+            const int xs[2] = {i, bar->width - 1 - i};
+            for (int k = 0; k < 2; k++) {
+                const int x = xs[k];
+                if (x < 0 || x >= bar->width) continue;
+                const double cx = k == 0 ? r : bar->width - r;
+                const double cov = circle_coverage(x, y, cx, r, r) - circle_coverage(x, y, cx, r, r - ow);
+                if (cov > 0) row[x] = blend_argb(row[x], 0x000000u, cov);
+            }
+        }
+    }
+    // light stroke inset behind the hairline: straight top edge
+    for (int y = ow; y < ow + ibw && y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        const double cov = fmin(1., bw - (y - ow));
+        const double t = ibw > 1 ? (y - ow) / (double)(ibw - 1) : 0.;
+        const double alpha = BORDER_TOP_ALPHA_OUT + (BORDER_TOP_ALPHA_IN - BORDER_TOP_ALPHA_OUT) * t;
+        for (int x = ir; x < bar->width - ir; x++)
+            row[x] = blend_argb(row[x], 0xffffffffu, cov * alpha);
+    }
+    // light stroke: side columns below the arcs
+    for (int y = ir; y < bar->height; y++) {
+        uint32_t *row = bar->px + (size_t)y * bar->width;
+        for (int i = ow; i < ow + ibw; i++) {
+            const double cov = fmin(1., bw - (i - ow));
             const int xs[2] = {i, bar->width - 1 - i};
             for (int k = 0; k < 2; k++) {
                 if (xs[k] < 0 || xs[k] >= bar->width) continue;
@@ -895,20 +944,28 @@ draw_titlebar_border(Canvas *bar, double r, double fscale) {
             }
         }
     }
-    // top corner arcs: stroke band [r - bw, r], alpha fading from the top
-    // value at the horizontal end to the side value at the vertical end
+    // light stroke: top corner arcs, band [r - ow - ibw, r - ow] (same width
+    // as the straight strokes), alpha rotating from the top-edge profile at
+    // the horizontal end of the arc to the flat side value at the vertical end
     for (int y = 0; y < ir && y < bar->height; y++) {
         uint32_t *row = bar->px + (size_t)y * bar->width;
-        const double topness = r > 0 ? fmax(0., (r - (y + 0.5)) / r) : 0;
-        const double alpha = BORDER_SIDE_ALPHA + (BORDER_TOP_ALPHA - BORDER_SIDE_ALPHA) * topness;
         for (int i = 0; i < ir; i++) {
             const int xs[2] = {i, bar->width - 1 - i};
             for (int k = 0; k < 2; k++) {
                 const int x = xs[k];
                 if (x < 0 || x >= bar->width) continue;
                 const double cx = k == 0 ? r : bar->width - r;
-                const double cov = circle_coverage(x, y, cx, r, r) - circle_coverage(x, y, cx, r, r - bw);
-                if (cov > 0) row[x] = blend_argb(row[x], 0xffffffffu, cov * alpha);
+                const double dx = fabs(cx - (x + 0.5)), dy = fmax(0., r - (y + 0.5));
+                const double d = sqrt(dx * dx + dy * dy);
+                const double topness = d > 0 ? dy / d : 0;
+                for (int j = 0; j < ibw; j++) {
+                    const double cov = circle_coverage(x, y, cx, r, r - ow - j) - circle_coverage(x, y, cx, r, r - ow - j - 1);
+                    if (cov <= 0) continue;
+                    const double t = ibw > 1 ? j / (double)(ibw - 1) : 0.;
+                    const double a_top = BORDER_TOP_ALPHA_OUT + (BORDER_TOP_ALPHA_IN - BORDER_TOP_ALPHA_OUT) * t;
+                    const double alpha = BORDER_SIDE_ALPHA + (a_top - BORDER_SIDE_ALPHA) * topness;
+                    row[x] = blend_argb(row[x], 0xffffffffu, cov * alpha);
+                }
             }
         }
     }
@@ -1151,7 +1208,7 @@ wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_b
     if (dragged && !s->drag_out) render_one_tab(window, dragged, &bar, fscale, s->ghost_x);
     if (wl_titlebar_tabs_rounded(window)) {
         draw_titlebar_border(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, fscale);
-        round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale);
+        round_top_corners(&bar, WINDOW_TOP_CORNER_RADIUS * fscale, WINDOW_CORNER_FEATHER * fscale);
     }
     if (bar.px != (uint32_t*)output) memcpy(output, bar.px, bar_sz);
     s->layout_bar_width = bar.width;

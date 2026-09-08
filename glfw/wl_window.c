@@ -2509,6 +2509,40 @@ update_drop_source_actions(_GLFWwindow *window, _GLFWWaylandDataOffer *offer) {
     if (offer->source_actions & WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK) window->drop_operation.source_actions |= GLFW_DRAG_OPERATION_GENERIC;
 }
 
+// fork: with native titlebar tabs the tab bar lives in the CSD titlebar
+// subsurface, so wl_data_device enter/motion/drop arrive for that subsurface
+// rather than the main wl_surface. The upstream lookup below only matches
+// main surfaces, silently discarding all DND events over the titlebar (a tab
+// dragged onto another kitty window's tab bar was never dropped). Resolve any
+// of a window's CSD subsurfaces as well and report its position offset so
+// surface-local coordinates can be translated to main-surface coordinates.
+static _GLFWwindow *
+fork_window_for_drop_surface(struct wl_surface *surface, int *dx, int *dy) {
+    *dx = 0;
+    *dy = 0;
+    if (!surface) return NULL;
+    for (_GLFWwindow *w = _glfw.windowListHead; w; w = w->next) {
+        if (w->wl.surface == surface) return w;
+    }
+    for (_GLFWwindow *w = _glfw.windowListHead; w; w = w->next) {
+        const _GLFWWaylandCSDSurface *csd[] = {
+            &w->wl.decorations.titlebar,
+            &w->wl.decorations.shadow_top, &w->wl.decorations.shadow_left,
+            &w->wl.decorations.shadow_bottom, &w->wl.decorations.shadow_right,
+            &w->wl.decorations.shadow_upper_left, &w->wl.decorations.shadow_upper_right,
+            &w->wl.decorations.shadow_lower_left, &w->wl.decorations.shadow_lower_right,
+        };
+        for (size_t i = 0; i < sizeof(csd) / sizeof(csd[0]); i++) {
+            if (csd[i]->surface && csd[i]->surface == surface) {
+                *dx = csd[i]->x;
+                *dy = csd[i]->y;
+                return w;
+            }
+        }
+    }
+    return NULL;
+}
+
 static void
 drag_enter(
     void *data UNUSED,
@@ -2529,19 +2563,16 @@ drag_enter(
     offer->serial = serial;
     offer->drag_accepted = false;
     offer->mime_for_drop = NULL;
-    _GLFWwindow *window = _glfw.windowListHead;
-    while (window) {
-        if (window->wl.surface == surface) {
-            double xpos = wl_fixed_to_double(x);
-            double ypos = wl_fixed_to_double(y);
-            if (reset_copy_mimes(offer)) {
-                update_drop_source_actions(window, offer);
-                size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_ENTER, xpos, ypos, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
-                update_drop_state(offer, window, mime_count);
-            }
-            break;
+    int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces (e.g. the native tab bar)
+    _GLFWwindow *window = fork_window_for_drop_surface(surface, &fork_dx, &fork_dy);
+    if (window) {
+        double xpos = wl_fixed_to_double(x) + fork_dx;
+        double ypos = wl_fixed_to_double(y) + fork_dy;
+        if (reset_copy_mimes(offer)) {
+            update_drop_source_actions(window, offer);
+            size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_ENTER, xpos, ypos, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
+            update_drop_state(offer, window, mime_count);
         }
-        window = window->next;
     }
 }
 
@@ -2550,14 +2581,9 @@ drag_leave(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
     debug_input("Drop left window\n");
     _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
     if (offer->id) {
-        _GLFWwindow *window = _glfw.windowListHead;
-        while (window) {
-            if (window->wl.surface == _glfw.wl.drop_data_offer.surface) {
-                _glfwInputDropEvent(window, GLFW_DROP_LEAVE, 0, 0, NULL, 0, offer->is_self_offer);
-                break;
-            }
-            window = window->next;
-        }
+        int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces
+        _GLFWwindow *window = fork_window_for_drop_surface(_glfw.wl.drop_data_offer.surface, &fork_dx, &fork_dy);
+        if (window) _glfwInputDropEvent(window, GLFW_DROP_LEAVE, 0, 0, NULL, 0, offer->is_self_offer);
         if (!offer->dropped) destroy_data_offer(offer);
     }
 }
@@ -2572,7 +2598,8 @@ ssize_t
 _glfwPlatformReadAvailableDropData(GLFWwindow *w, GLFWDropEvent *ev, char *buffer, size_t sz) {
     _GLFWwindow *window = (_GLFWwindow *)w;
     _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
-    if (!offer->id || offer->surface != window->wl.surface) return -ENOENT;
+    int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces
+    if (!offer->id || fork_window_for_drop_surface(offer->surface, &fork_dx, &fork_dy) != window) return -ENOENT;
     int fd = (int)ev->xpos;
     for (size_t o = 0; o < offer->dd_count; o++) {
         if (offer->requested_drop_data[o].fd == fd) {
@@ -2591,14 +2618,12 @@ drop_data_available(int fd, int events UNUSED, void *data UNUSED) {
     if (!offer->id) return;
     for (size_t o = 0; o < offer->dd_count; o++) {
         if (offer->requested_drop_data[o].fd == fd) {
-            _GLFWwindow *window = _glfw.windowListHead;
-            while (window) {
-                if (window->wl.surface == offer->surface) {
-                    const char *mimes[1] = {offer->requested_drop_data[o].mime};
-                    _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, fd, 0, mimes, 1, offer->is_self_offer);
-                    return;
-                }
-                window = window->next;
+            int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces
+            _GLFWwindow *window = fork_window_for_drop_surface(offer->surface, &fork_dx, &fork_dy);
+            if (window) {
+                const char *mimes[1] = {offer->requested_drop_data[o].mime};
+                _glfwInputDropEvent(window, GLFW_DROP_DATA_AVAILABLE, fd, 0, mimes, 1, offer->is_self_offer);
+                return;
             }
             destroy_data_offer(offer);
         }
@@ -2655,19 +2680,16 @@ drop(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED) {
     _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
     if (!offer->id) return;
     offer->dropped = true;
-    _GLFWwindow *window = _glfw.windowListHead;
-    while (window) {
-        if (window->wl.surface == offer->surface) {
-            if (reset_copy_mimes(offer)) {
-                size_t num_accepted = _glfwInputDropEvent(window, GLFW_DROP_DROP, 0, 0, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
-                if (offer->copy_mimes) { // a self drop will cause this to be NULL as glfw.c calls end drop from within the drop event handler
-                    update_drop_state(offer, window, num_accepted);
-                    for (size_t i = 0; i < num_accepted; i++) request_drop_data(offer, offer->copy_mimes[i]);
-                }
+    int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces
+    _GLFWwindow *window = fork_window_for_drop_surface(offer->surface, &fork_dx, &fork_dy);
+    if (window) {
+        if (reset_copy_mimes(offer)) {
+            size_t num_accepted = _glfwInputDropEvent(window, GLFW_DROP_DROP, 0, 0, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
+            if (offer->copy_mimes) { // a self drop will cause this to be NULL as glfw.c calls end drop from within the drop event handler
+                update_drop_state(offer, window, num_accepted);
+                for (size_t i = 0; i < num_accepted; i++) request_drop_data(offer, offer->copy_mimes[i]);
             }
-            break;
         }
-        window = window->next;
     }
 }
 
@@ -2676,19 +2698,16 @@ motion(void *data UNUSED, struct wl_data_device *wl_data_device UNUSED, uint32_t
     debug_input("Drop moved\n");
     _GLFWWaylandDataOffer *offer = &_glfw.wl.drop_data_offer;
     if (!offer->id) return;
-    _GLFWwindow *window = _glfw.windowListHead;
-    while (window) {
-        if (window->wl.surface == offer->surface) {
-            double xpos = wl_fixed_to_double(x);
-            double ypos = wl_fixed_to_double(y);
-            if (reset_copy_mimes(offer)) {
-                update_drop_source_actions(window, offer);
-                size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_MOVE, xpos, ypos, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
-                update_drop_state(offer, window, mime_count);
-            }
-            break;
+    int fork_dx = 0, fork_dy = 0;  // fork: also resolve CSD subsurfaces (e.g. the native tab bar)
+    _GLFWwindow *window = fork_window_for_drop_surface(offer->surface, &fork_dx, &fork_dy);
+    if (window) {
+        double xpos = wl_fixed_to_double(x) + fork_dx;
+        double ypos = wl_fixed_to_double(y) + fork_dy;
+        if (reset_copy_mimes(offer)) {
+            update_drop_source_actions(window, offer);
+            size_t mime_count = _glfwInputDropEvent(window, GLFW_DROP_MOVE, xpos, ypos, offer->copy_mimes, offer->copy_mimes_count, offer->is_self_offer);
+            update_drop_state(offer, window, mime_count);
         }
-        window = window->next;
     }
 }
 

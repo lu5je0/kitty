@@ -849,6 +849,11 @@ def fixup_opengl_code(glsl_code: str, shader_name: str, existing_metadata: GLSLM
         lambda m: f'{m.group(1)} {m.group(2)} = {m.group(1)}({m.group(3)})',
         ans,
     )
+    ans = re.sub(
+        r'\b(const\s+)?([A-Za-z_]\w*)\s+(\w+)\s*(\[[^]]+\])\s*=\s*\{([^}]*)\}',
+        lambda m: f'{m.group(1) or ""}{m.group(2)} {m.group(3)}{m.group(4)} = {m.group(2)}[]({m.group(5)})',
+        ans,
+    )
     m = GLSLMetadata()
     m.loose_uniforms = uniform_names
     m.uniform_structs = uniform_structs
@@ -1020,6 +1025,13 @@ class SlangFailed(Exception):
         else:
             cmd = shlex.join(args)
         super().__init__(f'Failed to compile {fname} with command line:\n{cmd}\nand stderr:\n{stderr.decode()}')
+
+
+def run_slangc_with_source(cmd: list[str], src: bytes, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+    with tempfile.NamedTemporaryFile(suffix='.slang') as source_file:
+        source_file.write(src)
+        source_file.flush()
+        return subprocess.run([*cmd, '--', source_file.name], capture_output=True, **kwargs)
 
 
 def key(*items: str | bytes) -> bytes:
@@ -1404,9 +1416,9 @@ def build_custom_shader_pipeline_ir(pipeline: Pipeline, cache_dir: str, invocati
         cache_ok = f.read() == ct_key
         mtime = max(mtime, os.fstat(f.fileno()).st_mtime_ns)
     if not cache_ok:
-        cmd = bc + ['-module-name', 'kitty_custom_shader_types', '-o', j('kitty-custom-shader-types.slang-module'), '--', '-']
+        cmd = bc + ['-module-name', 'kitty_custom_shader_types', '-o', j('kitty-custom-shader-types.slang-module')]
         invocation_tracker.add(tuple(cmd))
-        cp = subprocess.run(cmd, input=ct_shader, capture_output=True)
+        cp = run_slangc_with_source(cmd, ct_shader)
         if cp.returncode != 0:
             raise SlangFailed('custom-types.slang', cp)
         ct_key_path = j('ct.key')
@@ -1445,9 +1457,9 @@ def build_custom_shader_pipeline_ir(pipeline: Pipeline, cache_dir: str, invocati
             imports.append(modname)
             module_file = j(f'{modname}.slang-module')
             inc = ['-I', import_dir] if import_dir else []
-            cmd = bc + inc + [f'-Dfragment_main={entry_point(g_idx, s_idx)}', '-module-name', modname, '-o', module_file, '--', '-']
+            cmd = bc + inc + [f'-Dfragment_main={entry_point(g_idx, s_idx)}', '-module-name', modname, '-o', module_file]
             invocation_tracker.add(tuple(cmd))
-            cp = subprocess.run(cmd, input=src, capture_output=True)
+            cp = run_slangc_with_source(cmd, src)
             if cp.returncode != 0:
                 raise SlangFailed(name, cp)
             mtime = max(mtime, os.stat(module_file).st_mtime_ns)
@@ -1472,9 +1484,9 @@ def build_custom_shader_pipeline_ir(pipeline: Pipeline, cache_dir: str, invocati
     with tempfile.TemporaryDirectory() as tdir:
         for x in import_dirs:
             inc.extend(('-I', x))
-        cmd = bc + inc + ['-module-name', slot_module_name, '-o', ans, '--', '-']
+        cmd = bc + inc + ['-module-name', slot_module_name, '-o', ans]
         invocation_tracker.add(tuple(cmd))
-        cp = subprocess.run(cmd, cwd=tdir, capture_output=True, input=mod_src.encode())
+        cp = run_slangc_with_source(cmd, mod_src.encode(), cwd=tdir)
         if cp.returncode != 0:
             raise SlangFailed(f'{slot}.slang', cp)
 
@@ -1553,25 +1565,27 @@ def build_custom_shader_pipeline_glsl(
                     f'glsl_{glsl_version}',
                 ]
             )
-            vcmd = cmd + ['-stage', 'vertex', '-entry', 'vmain_wrap', '-o', vertex, '--', '-']
-            fcmd = cmd + ['-stage', 'fragment', '-entry', 'fmain_wrap', '-o', fragment, '--', '-']
+            vcmd = cmd + ['-stage', 'vertex', '-entry', 'vmain_wrap', '-o', vertex]
+            fcmd = cmd + ['-stage', 'fragment', '-entry', 'fmain_wrap', '-o', fragment]
             src = module_wrapper_for_slot(slot)
             invocation_tracker.add(tuple(vcmd))
             invocation_tracker.add(tuple(fcmd))
-            v = subprocess.Popen(vcmd, stderr=subprocess.PIPE, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
-            f = subprocess.Popen(fcmd, stderr=subprocess.PIPE, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
-            assert v.stdin is not None and f.stdin is not None
-            assert v.stderr is not None and f.stderr is not None
-            v.stdin.write(src), v.stdin.close()
-            f.stdin.write(src), f.stdin.close()
-            try:
-                if (rc := v.wait()) != 0:
-                    raise SlangFailed(f'{slot}.vert.glsl', subprocess.CompletedProcess(vcmd, rc, stderr=v.stderr.read()))
-                if (rc := f.wait()) != 0:
-                    raise SlangFailed(f'{slot}.frag.glsl', subprocess.CompletedProcess(fcmd, rc, stderr=f.stderr.read()))
-            finally:
-                v.stderr.close()
-                f.stderr.close()
+            with tempfile.NamedTemporaryFile(suffix='.slang') as source_file:
+                source_file.write(src)
+                source_file.flush()
+                actual_vcmd = [*vcmd, '--', source_file.name]
+                actual_fcmd = [*fcmd, '--', source_file.name]
+                v = subprocess.Popen(actual_vcmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+                f = subprocess.Popen(actual_fcmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+                assert v.stderr is not None and f.stderr is not None
+                try:
+                    if (rc := v.wait()) != 0:
+                        raise SlangFailed(f'{slot}.vert.glsl', subprocess.CompletedProcess(actual_vcmd, rc, stderr=v.stderr.read()))
+                    if (rc := f.wait()) != 0:
+                        raise SlangFailed(f'{slot}.frag.glsl', subprocess.CompletedProcess(actual_fcmd, rc, stderr=f.stderr.read()))
+                finally:
+                    v.stderr.close()
+                    f.stderr.close()
             fixup_opengl_files((fragment, vertex))
         with open(vertex) as vf, open(fragment) as ff:
             m = glsl_metadata_for_shader(metadata)
@@ -1600,7 +1614,10 @@ def test_slang_build() -> None:
 [shader("vertex")]
 float4 main(uint vertex_id : SV_VertexID) : SV_Position { return float4(vertex_id, 1, 0, 1); }
 """
-    cp = subprocess.run(list(slangc()) + '-lang slang -entry main -stage vertex -target glsl -o /dev/stdout -- -'.split(), input=src, capture_output=True)
+    with tempfile.TemporaryDirectory() as tdir:
+        output = os.path.join(tdir, 'test.glsl')
+        cmd = list(slangc()) + ['-lang', 'slang', '-entry', 'main', '-stage', 'vertex', '-target', 'glsl', '-o', output]
+        cp = run_slangc_with_source(cmd, src)
     if cp.returncode != 0:
         raise AssertionError(f'Test compile of shader to GLSL failed with returncode: {cp.returncode} and stderr: {cp.stderr.decode()}')
 

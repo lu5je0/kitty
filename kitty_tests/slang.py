@@ -18,6 +18,7 @@ from kitty.shaders.slang import (
     build_import_graph,
     clear_caches,
     custom_shader,
+    fixup_opengl_code,
     parse_pipeline_definition,
     parse_slang_text,
     parse_var_directive,
@@ -337,6 +338,11 @@ fsMain(VertexOutput vo) : SV_Target { return float4(0); }
         # Groups still carry shaders correctly
         self.assertEqual(p['groups'][0]['shaders'], ('sample',))
         self.assertEqual(p['groups'][1]['shaders'], ('sample',))
+
+    def test_fixup_array_initializer(self):
+        source = '#version 450\nconst uint values[3] = { 0U, 1U, 2U };\n'
+        fixed, _ = fixup_opengl_code(source, 'test', None)
+        self.assertIn('const uint values[3] = uint[]( 0U, 1U, 2U );', fixed)
 
     def test_build_custom_shader_pipeline_glsl(self):
         if not shutil.which(slangc()[0]):
