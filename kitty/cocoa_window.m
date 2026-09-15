@@ -1924,6 +1924,31 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
     [tab setFrame:NSMakeRect(p.x - [tab dragGrabOffsetX], ty, self.last_tab_width, kTabHeight)];
 }
 
+// re-sync hover state with the actual mouse position. When a view moves out
+// from under a stationary cursor AppKit drops the mouseExited event while
+// re-registering its tracking area, leaving the view stuck looking hovered.
+// No tracking events are delivered during a drag session, so skip it there;
+// the layout on drag end re-syncs.
+- (void)resyncHoverStates {
+    if (self.dragged_tab) return;
+    NSPoint mouse = [self.window mouseLocationOutsideOfEventStream];
+    for (KittyTitlebarTabView *tab in [self tabViews]) {
+        NSPoint p = [tab convertPoint:mouse fromView:nil];
+        BOOL h = NSPointInRect(p, tab.bounds);
+        if (h != tab.hovered) {
+            tab.hovered = h;
+            if (!h) tab.close_hovered = NO;
+            [tab applyColorsAnimated:NO];
+        }
+    }
+    NSPoint bp = [self.plusButton convertPoint:mouse fromView:nil];
+    BOOL bh = NSPointInRect(bp, self.plusButton.bounds);
+    if (bh != self.plusButton.hovered) {
+        self.plusButton.hovered = bh;
+        [self.plusButton setNeedsDisplay:YES];
+    }
+}
+
 - (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs {
     [self layoutTabsAnimated:animated initialLayoutForNewTabs:new_tabs draggedTab:self.dragged_tab dragIndex:self.drag_index];
 }
@@ -1975,6 +2000,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
             apply();
         }];
     } else apply();
+    [self resyncHoverStates];
 }
 
 - (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
@@ -2033,18 +2059,6 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
         }];
     }
     [self layoutTabsAnimated:(new_tabs.count > 0 || existing.count > 0) initialLayoutForNewTabs:new_tabs];
-    // re-sync hover state with the actual mouse position, lost mouseExited
-    // events would otherwise leave tabs stuck in the hovered state
-    NSPoint mouse = [self.window mouseLocationOutsideOfEventStream];
-    for (KittyTitlebarTabView *tab in ordered) {
-        NSPoint p = [tab convertPoint:mouse fromView:nil];
-        BOOL h = NSPointInRect(p, tab.bounds);
-        if (h != tab.hovered) {
-            tab.hovered = h;
-            if (!h) tab.close_hovered = NO;
-            [tab applyColorsAnimated:NO];
-        }
-    }
 }
 
 @end
