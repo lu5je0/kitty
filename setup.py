@@ -207,6 +207,8 @@ class CompilationDatabase:
         self.compile_commands: List[Command] = []
         self.link_commands: List[Command] = []
         self.post_link_commands: List[Command] = []
+        self.db: Dict[CompileKey, Sequence[str]] = {}
+        self.linkdb: Dict[CompileKey, Sequence[str]] = {}
 
     def add_command(
         self,
@@ -236,15 +238,15 @@ class CompilationDatabase:
 
         items = []
         for compile_cmd in self.compile_commands:
-            if not self.incremental or self.cmd_changed(compile_cmd) or compile_cmd.is_newer_func():
+            if not self.incremental or self.cmd_changed(compile_cmd, self.db) or compile_cmd.is_newer_func():
                 items.append(compile_cmd)
         items.sort(key=sort_key, reverse=True)
         parallel_run(items)
 
         items = []
-        for compile_cmd in self.link_commands:
-            if not self.incremental or compile_cmd.is_newer_func():
-                items.append(compile_cmd)
+        for link_cmd in self.link_commands:
+            if not self.incremental or self.cmd_changed(link_cmd, self.linkdb) or link_cmd.is_newer_func():
+                items.append(link_cmd)
         parallel_run(items)
 
         items = []
@@ -253,12 +255,10 @@ class CompilationDatabase:
                 items.append(compile_cmd)
         parallel_run(items)
 
-    def cmd_changed(self, compile_cmd: Command) -> bool:
-        key, cmd = compile_cmd.key, compile_cmd.cmd
-        dkey = self.db.get(key)
-        if dkey != cmd:
+    def cmd_changed(self, command: Command, database: Dict[CompileKey, Sequence[str]]) -> bool:
+        if command.key is None:
             return True
-        return False
+        return database.get(command.key) != command.cmd
 
     def __enter__(self) -> 'CompilationDatabase':
         self.all_keys: Set[CompileKey] = set()
@@ -276,7 +276,7 @@ class CompilationDatabase:
             link_database = []
         compilation_database = {CompileKey(k['file'], k['output']): k['arguments'] for k in compilation_database}
         self.db = compilation_database
-        self.linkdb = {tuple(k['output']): k['arguments'] for k in link_database}
+        self.linkdb = {CompileKey(*k['output']): k['arguments'] for k in link_database}
         return self
 
     def __exit__(self, *a: object) -> None:
@@ -675,7 +675,6 @@ def init_env(
     if profile:
         cppflags.append('-DWITH_PROFILER')
         cflags.append('-g3')
-        ldflags.append('-lprofiler')
 
     if debug or profile:
         cflags.append('-fno-omit-frame-pointer')
@@ -703,6 +702,7 @@ def init_env(
 
     if os.environ.get('DEVELOP_ROOT'):
         cflags.insert(0, f'-I{os.environ["DEVELOP_ROOT"]}/include')
+        cflags.insert(0, f'-DDEVELOP_ROOT="{os.environ["DEVELOP_ROOT"]}"')
         ldpaths.insert(0, f'-L{os.environ["DEVELOP_ROOT"]}/lib')
 
     if building_arch:
@@ -941,6 +941,16 @@ def get_source_specific_cflags(env: Env, src: str) -> List[str]:
                     ans.append('-x86-use-vzeroupper=0')
                 else:
                     ans.append('-mno-vzeroupper')
+    elif src == 'kitty/simd-string-512.c':
+        # uses native AVX-512 intrinsics, only compiled on x86-64, selected at runtime only when the CPU supports these features
+        if env.binary_arch.isa is ISA.AMD64:
+            ans.extend(('-mavx512f', '-mavx512bw', '-mavx512vl', '-mavx512vbmi2'))
+            # We have manual vzeroupper so prevent compiler from emitting it causing duplicates
+            if env.compiler_type is CompilerType.clang:
+                ans.append('-mllvm')
+                ans.append('-x86-use-vzeroupper=0')
+            else:
+                ans.append('-mno-vzeroupper')
     elif src.startswith('3rdparty/base64/lib/arch/'):
         if env.binary_arch.isa in (ISA.AMD64, ISA.X86):
             q = src.split(os.path.sep)
@@ -1203,7 +1213,7 @@ def glfw_init_env(
 
     elif module == 'cocoa':
         ans.cppflags.append('-DGL_SILENCE_DEPRECATION')
-        for f_ in 'Cocoa IOKit CoreFoundation CoreVideo QuartzCore UniformTypeIdentifiers'.split():
+        for f_ in 'Cocoa IOKit CoreFoundation CoreVideo UniformTypeIdentifiers'.split():
             ans.ldpaths.extend(('-framework', f_))
 
     elif module == 'wayland':
@@ -1601,8 +1611,6 @@ def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 's
             cflags.extend(sanitize_args)
             ldflags.extend(sanitize_args)
             libs += ['-lasan'] if not is_macos and env.compiler_type is not CompilerType.clang else []
-        if args.profile:
-            libs.append('-lprofiler')
     else:
         cflags.append('-g3' if args.debug else '-O3')
     if bundle_type.endswith('-freeze'):
@@ -2300,7 +2308,7 @@ def option_parser() -> argparse.ArgumentParser:  # {{{
         ' the Python used to run setup.py is queried for these.',
     )
     p.add_argument('--full', dest='incremental', default=Options.incremental, action='store_false', help='Do a full build, even for unchanged files')
-    p.add_argument('--profile', default=Options.profile, action='store_true', help='Use the -pg compile flag to add profiling information')
+    p.add_argument('--profile', default=Options.profile, action='store_true', help='Use compile flags to add profiling information')
     p.add_argument(
         '--libdir-name', default=Options.libdir_name, help='The name of the directory inside --prefix in which to store compiled files. Defaults to "lib"'
     )

@@ -48,6 +48,153 @@ class TestScreen(BaseTest):
         self.ae(str(s.line(4)), 'ab123')
         self.ae((s.cursor.x, s.cursor.y), (2, 4))
 
+    def test_draw_batched_ascii_run(self):
+        # The batched fast path for runs of printable ASCII in draw_text_loop
+        # must behave identically to drawing char by char
+
+        # a run crossing multiple line wraps
+        s = self.create_screen()
+        s.draw('abcdefghijkl')
+        self.ae(str(s.line(0)), 'abcde')
+        self.ae(str(s.line(1)), 'fghij')
+        self.ae(str(s.line(2)), 'kl')
+        self.assertTrue(s.linebuf.is_continued(1))
+        self.assertTrue(s.linebuf.is_continued(2))
+        self.ae((s.cursor.x, s.cursor.y), (2, 2))
+
+        # without line-wrap the run must stop at the right margin and
+        # overwrite the last column
+        s = self.create_screen()
+        s.reset_mode(DECAWM)
+        s.draw('abcdefgh')
+        self.ae(str(s.line(0)), 'abcdh')
+        self.ae((s.cursor.x, s.cursor.y), (5, 0))
+
+        # insert mode must bypass the batch and insert per char
+        s = self.create_screen()
+        s.draw('12345')
+        s.cursor_position(1, 1)
+        s.set_mode(IRM)
+        s.draw('abc')
+        self.ae(str(s.line(0)), 'abc12')
+        self.ae((s.cursor.x, s.cursor.y), (3, 0))
+
+        # charset translation must still be applied to every char of a run
+        s = self.create_screen()
+        parse_bytes(s, b'\x1b(0qqq\x1b(B')
+        self.ae(str(s.line(0)), '─' * 3)
+
+        # overwriting the first cell of a wide char nukes the whole wide char
+        s = self.create_screen()
+        s.draw('ニチ')
+        s.cursor_position(1, 1)
+        s.draw('ab')
+        self.ae(str(s.line(0)), 'abチ')
+        # overwriting the second cell of a wide char replaces it with spaces
+        s = self.create_screen()
+        s.draw('ニチ')
+        s.cursor_position(1, 2)
+        s.draw('a')
+        self.ae(str(s.line(0)), ' aチ')
+
+        # a run drawn over a multiline multicell char must be handled by the
+        # scalar path
+        s = self.create_screen()
+        draw_multicell(s, 'X', scale=2)
+        before_line1 = str(s.line(1))
+        s.cursor_position(1, 1)
+        s.draw('abc')
+        self.ae(str(s.line(0)), 'abc')
+        self.ae(str(s.line(1)), before_line1)
+        # drawing on a lower row of a multiline char moves the cursor past it
+        s = self.create_screen()
+        draw_multicell(s, 'X', scale=2)
+        s.cursor_position(2, 1)
+        s.draw('ab')
+        self.ae(str(s.line(0)), 'X')
+        self.ae((s.cursor.x, s.cursor.y), (4, 1))
+
+        # REP must repeat the last char of a batched run
+        s = self.create_screen()
+        s.draw('abc')
+        parse_bytes(s, b'\x1b[2b')
+        self.ae(str(s.line(0)), 'abccc')
+
+        # a combining char following a run attaches to the run's last char,
+        # also when the run ends exactly at the right margin
+        s = self.create_screen()
+        s.draw('ab́cd')
+        self.ae(str(s.line(0)), 'ab́cd')
+        self.ae((s.cursor.x, s.cursor.y), (4, 0))
+        s = self.create_screen()
+        s.draw('abcdé')
+        self.ae(str(s.line(0)), 'abcdé')
+        self.ae((s.cursor.x, s.cursor.y), (5, 0))
+
+        # a wide ZWJ emoji following a run
+        s = self.create_screen()
+        s.draw('ab\U0001f468‍\U0001f466')
+        self.ae(str(s.line(0)), 'ab\U0001f468‍\U0001f466')
+        self.ae((s.cursor.x, s.cursor.y), (4, 0))
+
+        # the active hyperlink must be applied to all cells of a run
+        s = self.create_screen()
+        parse_bytes(s, '\x1b]8;;http://x.com\x1b\\'.encode('utf-8'))
+        s.draw('abc')
+        parse_bytes(s, '\x1b]8;;\x1b\\'.encode('utf-8'))
+        s.draw('d')
+        self.ae(s.line(0).hyperlink_ids(), (1, 1, 1, 0, 0))
+
+        # SGR attributes must be applied to all cells of a run
+        s = self.create_screen()
+        parse_bytes(s, b'\x1b[31mabc\x1b[39md')
+        self.ae(s.line(0).as_ansi(), '\x1b[31mabc\x1b[39md')
+
+        # drawing over a selection must clear it
+        s = self.create_screen()
+        s.draw('hello')
+        s.start_selection(0, 0)
+        s.update_selection(4, 0)
+        self.ae(''.join(s.text_for_selection()), 'hello')
+        s.cursor_position(1, 1)
+        s.draw('bye')
+        self.ae(s.text_for_selection(), ())
+        # also when the run wraps onto the selected line
+        s = self.create_screen()
+        s.draw('hello')
+        s.carriage_return(), s.linefeed()
+        s.draw('world')
+        s.start_selection(0, 1)
+        s.update_selection(4, 1)
+        self.ae(''.join(s.text_for_selection()), 'world')
+        s.cursor_position(1, 1)
+        s.draw('a' * (s.columns + 1))
+        self.ae(s.text_for_selection(), ())
+
+        # scrolling must keep an existing selection anchored to its content
+        s = self.create_screen()
+        for i in range(s.lines):
+            if i:
+                s.carriage_return(), s.linefeed()
+            s.draw(str(i) * s.columns)
+        s.start_selection(0, 0)
+        s.update_selection(4, 0)
+        self.ae(''.join(s.text_for_selection()), '00000')
+        s.linefeed()
+        self.ae(''.join(s.text_for_selection()), '00000')
+
+        # tabs at various offsets, exercising the memoized tab text lookup
+        s = self.create_screen(cols=32)
+        s.draw('a\tbc\td\te')
+        self.ae((s.cursor.x, s.cursor.y), (25, 0))
+        self.ae(s.line(0).as_ansi(), 'a\tbc\td\te')
+        # a tab spanning more columns than the memo covers
+        s = self.create_screen(cols=40)
+        parse_bytes(s, b'\x1b[3g')  # clear all tab stops
+        s.draw('a\tb')
+        self.ae((s.cursor.x, s.cursor.y), (40, 0))
+        self.ae(s.line(0).as_ansi(), 'a\tb')
+
     def test_draw_char(self):
         # Test in line-wrap, non-insert mode
         s = self.create_screen()
@@ -1816,9 +1963,15 @@ class TestScreen(BaseTest):
             parse_bytes(s, b'\x1b]21;' + ';'.join(f'{k}={v}' for k, v in send.items()).encode() + b'\a')
             self.ae(s.callbacks.color_control_responses, [expected] if expected else [])
 
+        # Unknown fields must be reported with their name base64 encoded, not echoed back
+        # verbatim, to prevent using this escape code to emit arbitrary printable ASCII text
         q(
             {k: '?' for k in 'background foreground 213 unknown'.split()},
-            {'background': opts.background, 'foreground': opts.foreground, '213': Color(255, 135, 255), 'unknown': '?'},
+            {'background': opts.background, 'foreground': opts.foreground, '213': Color(255, 135, 255), 'unknown': ['unknown']},
+        )
+        q(
+            {'arbitrary text!': '?', ' 5 ': '?', 'transparent_background_colorX': '?'},
+            {'unknown': ['arbitrary text!', ' 5 ', 'transparent_background_colorX']},
         )
         q({'background': 'aquamarine'})
         q(
@@ -1834,7 +1987,7 @@ class TestScreen(BaseTest):
         q({'213': '?'}, {'213': Color(216, 125, 215)})
         self.assertTrue(s.color_profile.palette_color_is_generated(213))
         s.color_profile.reload_from_opts(opts)
-        q({'transparent_background_color9': '?'}, {'transparent_background_color9': '?'})
+        q({'transparent_background_color9': '?'}, {'unknown': ['transparent_background_color9']})
         q({'transparent_background_color2': '?'}, {'transparent_background_color2': ''})
         q({'transparent_background_color2': 'red@0.5'})
         q({'transparent_background_color2': '?'}, {'transparent_background_color2': (Color(255, 0, 0), 126)})
@@ -1971,6 +2124,29 @@ class TestScreen(BaseTest):
         self.assertFalse(s.is_main_linebuf())
         s.reset()
         self.assertTrue(s.is_main_linebuf())
+
+    def test_ime_preedit_styling(self):
+        # Pre-edit text is marked with italics and a dashed underline in the
+        # highlight color, rather than reverse video.
+        s = self.create_screen(cols=10, lines=3)
+        s.draw('xy')
+        before = s.line(0).cursor_from(0)
+        s.test_draw_overlay_line('ab', 0, 0)
+        line = s.line(0)
+        for x in (0, 1):
+            c = line.cursor_from(x)
+            self.assertTrue(c.italic, f'pre-edit cell {x} is not italic')
+            self.assertFalse(c.reverse, f'pre-edit cell {x} is in reverse video')
+            self.ae(c.decoration, 5, f'pre-edit cell {x} is not dashed-underlined')
+            # decoration_fg is packed as (rgb << 8) | type, type 2 being RGB
+            self.ae(c.decoration_fg & 0xFF, 2)
+            self.ae(c.decoration_fg >> 8, 0xFFFACD)  # default selection_background
+
+        # the styling is applied to the overlay's own cursor and must be
+        # restored, not leaked into the screen's cursor
+        self.assertFalse(s.cursor.italic)
+        self.ae(s.cursor.decoration, before.decoration)
+        self.ae(s.cursor.decoration_fg, before.decoration_fg)
 
 
 def detect_url(self, scale=1):

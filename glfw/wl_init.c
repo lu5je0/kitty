@@ -254,7 +254,7 @@ pointer_handle_frame(void *data UNUSED, struct wl_pointer *pointer UNUSED) {
     ev.x_offset = scale * ev.unscaled.x;
     ev.y_offset = scale * ev.unscaled.y;
     glfw_handle_scroll_event_for_momentum(window, &ev, stopped, info.source_type == WL_POINTER_AXIS_SOURCE_FINGER);
-    window->wl.prev_frame_offset_type = ev.offset_type;
+    if (found) window->wl.prev_frame_offset_type = ev.offset_type;
     /* clear pointer_curr_axis_info for next frame */
     memset(&info, 0, sizeof(info));
 }
@@ -890,12 +890,6 @@ _glfwPlatformTerminate(void) {
         }
         free(_glfw.wl.activation_requests.array);
     }
-    _glfwTerminateEGL();
-    if (_glfw.wl.egl.handle) {
-        _glfw_dlclose(_glfw.wl.egl.handle);
-        _glfw.wl.egl.handle = NULL;
-    }
-
     glfw_xkb_release(&_glfw.wl.xkb);
     glfw_dbus_terminate(&_glfw.wl.dbus);
 
@@ -952,10 +946,28 @@ _glfwPlatformTerminate(void) {
     if (_glfw.wl.pointer_gestures) zwp_pointer_gestures_v1_release(_glfw.wl.pointer_gestures);
 
     if (_glfw.wl.registry) wl_registry_destroy(_glfw.wl.registry);
+    // Call eglTerminate before disconnecting from the display: eglTerminate
+    // sends Wayland protocol requests which must be flushed and their closures
+    // drained before we unload the EGL library.  The dlclose calls move to
+    // after wl_display_disconnect so the message format tables remain mapped
+    // while the queue is drained, preventing a segfault in
+    // destroy_queued_closure().
+    if (_glfw.egl.display) {
+        eglTerminate(_glfw.egl.display);
+        _glfw.egl.display = EGL_NO_DISPLAY;
+    }
     if (_glfw.wl.display) {
         wl_display_flush(_glfw.wl.display);
         wl_display_disconnect(_glfw.wl.display);
         _glfw.wl.display = NULL;
+    }
+    if (_glfw.egl.handle) {
+        _glfw_dlclose(_glfw.egl.handle);
+        _glfw.egl.handle = NULL;
+    }
+    if (_glfw.wl.egl.handle) {
+        _glfw_dlclose(_glfw.wl.egl.handle);
+        _glfw.wl.egl.handle = NULL;
     }
     finalizePollData(&_glfw.wl.eventLoopData);
     if (_glfw.wl.compositor_name) {

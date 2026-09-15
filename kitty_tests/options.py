@@ -35,6 +35,61 @@ class TestConfParsing(BaseTest):
     def test_cli_parsing(self):
         cli_parsing(self)
 
+    def test_font_size_clamping(self):
+        font_size_clamping(self)
+
+    def test_session_discovery(self):
+        from unittest.mock import patch
+
+        from kitty.config import load_config
+        from kitty.constants import config_dir
+        from kitty.fast_data_types import set_options
+        from kitty.session import get_all_known_sessions, seen_session_paths
+
+        def discover(*lines):
+            bad_lines = []
+            opts = load_config(overrides=('clear_all_shortcuts yes', *lines), accumulate_bad_lines=bad_lines)
+            self.assertFalse(bad_lines)
+            set_options(opts)
+            return get_all_known_sessions()
+
+        with patch.dict(seen_session_paths, {}, clear=True):
+            for args, name in (
+                ('work.kitty-session', 'work'),
+                ('--sort-by alphabetical work.kitty-session', 'work'),
+                ('--sort-by=alphabetical work.kitty-session', 'work'),
+                ('--active-only=no --sort-by recent work.kitty-session', 'work'),
+                ('work.kitty-session --sort-by alphabetical', 'work'),
+                ('-- "-work project.kitty-session"', '-work project'),
+                ('-- -0', '-0'),
+                ('', ''),
+                ('--sort-by alphabetical', ''),
+                ('--sort-by=alphabetical', ''),
+                ('--active-only', ''),
+                ('-1', ''),
+                ('-- -1', ''),
+                ('--sort-by alphabetical -- -2', ''),
+                ('--sort-by', ''),
+                ('--sort-by invalid work.kitty-session', ''),
+                ('--unknown work.kitty-session', ''),
+                ('--active-only=invalid work.kitty-session', ''),
+            ):
+                with self.subTest(args=args):
+                    filename = f'{name}.kitty-session' if name != '-0' else name
+                    expected = {name: os.path.join(config_dir, filename)} if name else {}
+                    self.ae(discover(f'map f7 goto_session {args}'), expected)
+
+            seen_path = os.path.join(self.tdir, 'work.kitty-session')
+            seen_session_paths['work'] = seen_path
+            self.ae(
+                discover(
+                    'action_alias project goto_session --sort-by alphabetical',
+                    'map f7 project work.kitty-session',
+                    'map f8 combine : goto_session --sort-by : project other.kitty-session',
+                ),
+                {'work': seen_path, 'other': os.path.join(config_dir, 'other.kitty-session')},
+            )
+
 
 def cli_parsing(self):
     from kitty.cli import CLIOptions, Options, parse_cmdline, parse_option_spec
@@ -122,6 +177,32 @@ version
     t('-1 -v0', fails=True, version_called=True)
     t('-1 --version', fails=True, version_called=True)
     t('-f=3.142 --int 17', float=3.142, int=17)
+
+
+def font_size_clamping(self: 'BaseTest') -> None:
+    from kitty.options.utils import MAXIMUM_FONT_SIZE, MINIMUM_FONT_SIZE, clamp_font_size
+
+    # the floor applies whatever the configured size
+    self.ae(clamp_font_size(0, 11), MINIMUM_FONT_SIZE)
+    self.ae(clamp_font_size(-100, 11), MINIMUM_FONT_SIZE)
+
+    # sizes inside the range come back untouched
+    self.ae(clamp_font_size(11, 11), 11)
+    self.ae(clamp_font_size(64, 11), 64)
+
+    # the ceiling is the larger of the multiple and the absolute maximum, so a
+    # small configured size no longer implies a small maximum zoom
+    self.ae(clamp_font_size(1e6, 4), MAXIMUM_FONT_SIZE)
+    self.ae(clamp_font_size(1e6, 11), MAXIMUM_FONT_SIZE)
+    self.ae(clamp_font_size(200, 4), 200)
+
+    # a large configured size keeps its proportional ceiling
+    self.ae(clamp_font_size(1e6, 40), 400)
+    self.ae(clamp_font_size(1e6, 100), 1000)
+
+    # and the ceiling is never below the absolute maximum
+    for configured in (1, 4, 11, 25.6, 40, 100):
+        self.assertGreaterEqual(clamp_font_size(1e6, configured), MAXIMUM_FONT_SIZE)
 
 
 def launcher(self):
@@ -255,6 +336,10 @@ def conf_parsing(self):
 
     opts = p('font_size 11.37', 'clear_all_shortcuts y', 'color23 red')
     self.ae(opts.font_size, 11.37)
+    radius_opts = p('window_border_radius 7px')
+    self.ae(radius_opts.window_border_radius, (7.0, 'px'))
+    radius_opts = p('window_border_radius -2')
+    self.ae(radius_opts.window_border_radius, (0.0, 'pt'))
     self.ae(opts.mouse_hide_wait[0], 0 if is_macos else 3)
     self.ae(opts.mouse_hide_wait[1], 0)
     self.ae(opts.mouse_hide_wait[2], 40)
@@ -459,3 +544,37 @@ def conf_parsing(self):
     opts = p(f'include {a.name}', num_err=0, bad_line_num=1)
     self.ae(opts.foreground, to_color('red'))
     self.ae(opts.background, to_color('red'))
+
+    # remap_modifier. NOTE: parsing only. Whether the permutation is applied
+    # simultaneously rather than sequentially is a property of
+    # apply_modifier_remap() in C and is NOT observable from this dict - a
+    # sequential implementation would produce an identical one. That property is
+    # covered end to end by tests/test-remap-e2e.sh, which asserts that the
+    # encoded bytes actually exchange.
+    self.ae(p().remap_modifiers, {})
+    ctrl, hyper, sup = to_modifiers('ctrl'), to_modifiers('hyper'), to_modifiers('super')
+    self.ae(p('remap_modifiers ctrl:hyper').remap_modifiers, {ctrl: hyper})
+    # both directions of a swap are recorded
+    self.ae(p('remap_modifiers ctrl:hyper hyper:ctrl').remap_modifiers, {ctrl: hyper, hyper: ctrl})
+    # the last declaration for a given source wins, wherever it appears
+    self.ae(p('remap_modifiers ctrl:hyper', 'kitty_mod ctrl', 'remap_modifiers ctrl:super').remap_modifiers, {ctrl: sup})
+    # the destination may name more than one modifier
+    self.ae(p('remap_modifiers ctrl:ctrl+shift').remap_modifiers, {ctrl: to_modifiers('ctrl+shift')})
+    # every rejection must be REPORTED, never silently ignored: wrong arity, unknown
+    # or non-remappable modifier names, a source naming more than one modifier, and
+    # a mapping that does nothing
+    for bad in (
+        'remap_modifiers ctrl',
+        'remap_modifiers ctrl:hyper super',
+        'remap_modifiers ctrl:nosuchmod',
+        'remap_modifiers nosuchmod:ctrl',
+        'remap_modifiers ctrl+shift:hyper',
+        'remap_modifiers ctrl:none',
+        'remap_modifiers none:ctrl',
+        'remap_modifiers ctrl:kitty_mod',
+        'remap_modifiers kitty_mod:ctrl',
+        'remap_modifiers caps_lock:ctrl',
+        'remap_modifiers ctrl:num_lock',
+        'remap_modifiers ctrl:ctrl',
+    ):
+        self.ae(p(bad, num_err=1).remap_modifiers, {}, f'not rejected: {bad}')

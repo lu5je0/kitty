@@ -124,6 +124,11 @@ typedef struct Options {
     bool resize_in_steps;
     bool sync_to_monitor;
     bool close_on_child_death;
+    // remap_modifier: modifier_remap[i] is the mask that the modifier at bit i
+    // is presented as, or 0 to leave it alone. modifier_remap_mask is the OR of
+    // all remapped source bits, used as a fast path.
+    int modifier_remap[8];
+    int modifier_remap_mask;
     bool window_alert_on_bell;
     bool macos_dock_badge_on_bell;
     bool debug_keyboard;
@@ -357,8 +362,8 @@ typedef struct Window {
         bool can_offer, is_remote_client;
         struct {
             index_type x, y;
-            bool active;
-        } potential_url_drag;
+            enum { POTENTIAL_DRAG_NONE, POTENTIAL_DRAG_URL, POTENTIAL_DRAG_SELECTION } type;
+        } potential_drag;
         struct {
             double x, y;
             monotonic_t at;
@@ -410,11 +415,13 @@ typedef struct BorderRect {
     uint32_t color;
     long long border_type;
     bool horizontal;
+    unsigned radius, thickness;
 } BorderRect;
 
 typedef struct BorderRects {
     BorderRect *rect_buf;
     unsigned int num_border_rects, capacity;
+    unsigned int num_rounded_rects;
     bool is_dirty;
     ssize_t vao_idx;
 } BorderRects;
@@ -704,6 +711,7 @@ OSWindow *current_os_window(void);
 void os_window_regions(const OSWindow *, Region *main, Region *tab_bar);
 bool drag_scroll(Window *, OSWindow *);
 void draw_borders(ssize_t vao_idx, unsigned int num_border_rects, BorderRect *rect_buf, bool rect_data_is_dirty, color_type, unsigned int, bool, OSWindow *w);
+void draw_rounded_borders(BorderRects *, color_type, unsigned int, bool, OSWindow *);
 ssize_t create_cell_vao(void);
 ssize_t create_border_vao(void);
 void bind_shader_globals_to_current_context(void);
@@ -753,6 +761,7 @@ void update_ime_focus(OSWindow *osw, bool focused);
 void update_ime_position(Window *w, Screen *screen);
 bool update_ime_position_for_window(id_type window_id, bool force, int update_focus);
 void set_ignore_os_keyboard_processing(bool enabled);
+void push_modifier_remap_to_glfw(void);
 void update_menu_bar_title(PyObject *title UNUSED);
 void change_live_resize_state(OSWindow *, bool);
 bool render_os_window(OSWindow *w, monotonic_t now, bool scan_for_animated_images);

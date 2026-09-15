@@ -490,6 +490,57 @@ translateFlags(NSUInteger flags) {
     return mods;
 }
 
+// Apply remap_modifier to Cocoa modifier flags. This has to happen BEFORE the
+// flags are used to produce text - UCKeyTranslate() below, and Cocoa's own
+// interpretKeyEvents: - for the same reason as on Linux: Option produces text
+// natively (see macos_option_as_alt), so remapping only the finished event's
+// modifier bitmask would leave the modifiers and the text contradicting each
+// other.
+//
+// Only the flags that GLFW models as remappable modifiers are touched; caps
+// lock, function, numeric pad and the device-dependent bits pass through.
+// GLFW_MOD_HYPER and GLFW_MOD_META have no Cocoa flag, so a remap onto them
+// cannot be represented here and is left alone rather than silently dropped.
+static NSUInteger
+remap_cocoa_flags(NSUInteger flags) {
+    if (!_glfw.modifierRemapMask) return flags;
+    int mods = 0;
+    if (flags & NSEventModifierFlagShift) mods |= GLFW_MOD_SHIFT;
+    if (flags & NSEventModifierFlagControl) mods |= GLFW_MOD_CONTROL;
+    if (flags & NSEventModifierFlagOption) mods |= GLFW_MOD_ALT;
+    if (flags & NSEventModifierFlagCommand) mods |= GLFW_MOD_SUPER;
+    const int remapped = _glfwApplyModifierRemap(mods);
+    if (remapped == mods) return flags;
+    if (remapped & (GLFW_MOD_HYPER | GLFW_MOD_META)) return flags;
+    NSUInteger ans = flags & ~(NSUInteger)(NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
+    if (remapped & GLFW_MOD_SHIFT) ans |= NSEventModifierFlagShift;
+    if (remapped & GLFW_MOD_CONTROL) ans |= NSEventModifierFlagControl;
+    if (remapped & GLFW_MOD_ALT) ans |= NSEventModifierFlagOption;
+    if (remapped & GLFW_MOD_SUPER) ans |= NSEventModifierFlagCommand;
+    return ans;
+}
+
+// Rebuild a key event carrying the remapped flags, for handing to
+// interpretKeyEvents:. NOTE the characters strings were computed by the OS from
+// the PHYSICAL flags and cannot be recomputed here, so this path is only
+// approximately corrected; the UCKeyTranslate() path above, which is the one
+// normally taken, uses the remapped flags directly and is exact.
+static NSEvent *
+event_with_remapped_flags(NSEvent *event, NSUInteger flags) {
+    if (flags == [event modifierFlags]) return event;
+    NSEvent *ans = [NSEvent keyEventWithType:[event type]
+                                    location:[event locationInWindow]
+                               modifierFlags:flags
+                                   timestamp:[event timestamp]
+                                windowNumber:[event windowNumber]
+                                     context:nil
+                                  characters:[event characters]
+                 charactersIgnoringModifiers:[event charactersIgnoringModifiers]
+                                   isARepeat:[event isARepeat]
+                                     keyCode:[event keyCode]];
+    return ans ? ans : event;
+}
+
 static const char *
 format_mods(int mods) {
     static char buf[128];
@@ -1184,7 +1235,8 @@ is_ascii_control_char(char x) {
     }
 
     const unsigned int keycode = [event keyCode];
-    const NSUInteger flags = [event modifierFlags];
+    const NSUInteger flags = remap_cocoa_flags([event modifierFlags]);
+    event = event_with_remapped_flags(event, flags);
     const int mods = translateFlags(flags);
     const uint32_t key = translateKey(keycode, true);
     // A filter result of 1 suppresses text entirely, 2 bypasses the IME but
@@ -1306,7 +1358,7 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
     int action = GLFW_RELEASE;
     const char old_first_char = _glfw.ns.text[0];
     _glfw.ns.text[0] = 0;
-    const NSUInteger modifierFlags = [event modifierFlags] & NSEventModifierFlagDeviceIndependentFlagsMask;
+    const NSUInteger modifierFlags = remap_cocoa_flags([event modifierFlags]) & NSEventModifierFlagDeviceIndependentFlagsMask;
     const uint32_t key = vk_code_to_functional_key_code([event keyCode]);
     const unsigned int keycode = [event keyCode];
     const int mods = translateFlags(modifierFlags);
@@ -1364,7 +1416,7 @@ is_modifier_pressed(NSUInteger flags, NSUInteger target_mask, NSUInteger other_m
 - (void)keyUp:(NSEvent *)event {
     const uint32_t keycode = [event keyCode];
     const uint32_t key = translateKey(keycode, true);
-    const int mods = translateFlags([event modifierFlags]);
+    const int mods = translateFlags(remap_cocoa_flags([event modifierFlags]));
 
     GLFWkeyevent glfw_keyevent = {.key = key, .native_key = keycode, .native_key_id = keycode, .action = GLFW_RELEASE, .mods = mods};
     add_alternate_keys(&glfw_keyevent, event);
@@ -1412,8 +1464,13 @@ static void
 free_in_progress_drop_data(_GLFWwindow *window) {
     _GLFWDropData *d = &window->ns.drop_data;
     if (d->in_progress_drop.temp_dir) {
-        NSError *error = nil;
-        [[NSFileManager defaultManager] removeItemAtURL:d->in_progress_drop.temp_dir error:&error];
+        // When the paths of the files fulfilled from promises have been handed
+        // to the application, it is responsible for removing the temp dir
+        // holding them, see glfwCocoaPreserveDroppedFilePromises().
+        if (!d->in_progress_drop.keep_temp_dir) {
+            NSError *error = nil;
+            [[NSFileManager defaultManager] removeItemAtURL:d->in_progress_drop.temp_dir error:&error];
+        }
         [d->in_progress_drop.temp_dir release];
     }
     if (d->in_progress_drop.data_map) [d->in_progress_drop.data_map release];
@@ -1471,6 +1528,30 @@ reset_drop_copy_mimes(_GLFWDropData *d) {
     return true;
 }
 
+// Is this promise a promise of a file, whose path is what the drop target
+// wants, or merely a promise of the data for some MIME type?
+//
+// Our own drag source distinguishes between the two by the type of the promise:
+// public.file-url for a file and the UTI of the MIME type for data, see
+// add_drag_items(). Other applications have no such convention, they promise
+// the content type of the promised file, for instance the macOS screenshot
+// thumbnail promises public.png, so for them every promise is of a file.
+//
+// from_self is true only for a drag started by this process, which is the same
+// scope in which the rest of the code recognises its own drags, since the MIME
+// types used for tab and window drags have the pid embedded in them. A drag
+// from a different kitty process is therefore treated like any other
+// application's drag.
+static bool
+file_promise_is_for_a_file(NSFilePromiseReceiver *receiver, bool from_self) {
+    if (!from_self) return [receiver.fileTypes count] > 0;
+    for (NSString *uti in receiver.fileTypes) {
+        UTType *promisedType = [UTType typeWithIdentifier:uti];
+        if (promisedType && [promisedType conformsToType:UTTypeFileURL]) return true;
+    }
+    return false;
+}
+
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     const NSRect contentRect = [window->ns.view frame];
     const NSPoint pos = [sender draggingLocation];
@@ -1480,6 +1561,7 @@ reset_drop_copy_mimes(_GLFWDropData *d) {
 
     // Get MIME types from the dragging pasteboard
     NSPasteboard *pasteboard = [sender draggingPasteboard];
+    const bool from_self = ([sender draggingSource] != nil);
 
     // Count total types across all pasteboard items plus 2 for uri-list and text/plain
     size_t max_types = 2;
@@ -1515,18 +1597,21 @@ reset_drop_copy_mimes(_GLFWDropData *d) {
             if (!duplicate) mime_array[mime_count++] = _glfw_strdup(mime); \
         }                                                                  \
     }
-    // Get file promise based types
+    // Get file promise based types. A promise of a file contributes its path to
+    // the uri-list, see file_promise_is_for_a_file(). The type of the promised
+    // data is advertised as well, for clients that want the contents rather
+    // than the path.
     for (NSFilePromiseReceiver *receiver in receivers) {
+        if (!has_uri_list && file_promise_is_for_a_file(receiver, from_self)) {
+            mime_array[mime_count++] = _glfw_strdup("text/uri-list");
+            has_uri_list = true;
+        }
         for (NSString *uti in receiver.fileTypes) {
             UTType *promisedType = [UTType typeWithIdentifier:uti];
-            if (promisedType && [promisedType conformsToType:UTTypeFileURL]) {
-                if (!has_uri_list) {
-                    mime_array[mime_count++] = _glfw_strdup("text/uri-list");
-                    has_uri_list = true;
-                }
-            } else {
-                add_mime(uti);
-            }
+            // A promise of a bare file URL says nothing about the contents of
+            // the file, so there is no MIME type to advertise for it.
+            if (promisedType && [promisedType conformsToType:UTTypeFileURL]) continue;
+            add_mime(uti);
         }
     }
 
@@ -1537,7 +1622,6 @@ reset_drop_copy_mimes(_GLFWDropData *d) {
 
     window->ns.drop_data.mimes = mime_array;
     window->ns.drop_data.mimes_count = mime_count;
-    bool from_self = ([sender draggingSource] != nil);
     update_drop_source_actions(window, sender);
     _GLFWDropData *d = &window->ns.drop_data;
     if (reset_drop_copy_mimes(d)) {
@@ -1605,6 +1689,7 @@ create_uri_list(_GLFWDropData *d, NSArray *urls) {
         [items addObject:url.absoluteString];
     }
     NSString *result = [items componentsJoinedByString:@"\r\n"];
+    debug("Drop uri-list: %s\n", [result UTF8String]);
     NSData *data = [result dataUsingEncoding:NSUTF8StringEncoding];
     NSInputStream *inputStream = [NSInputStream inputStreamWithData:data];
     [inputStream open];
@@ -1613,11 +1698,14 @@ create_uri_list(_GLFWDropData *d, NSArray *urls) {
 
 static void
 build_uri_list(_GLFWDropData *d) {
-    if (!d->in_progress_drop.path_map) return;
+    NSDictionary *path_map = d->in_progress_drop.path_map;
+    if (!path_map) return;
     NSMutableArray<NSURL *> *urls = [NSMutableArray array];
-    for (NSString *mime in d->in_progress_drop.path_map) {
-        if (![mime hasPrefix:@"kitty-internal/uri-list-item-"]) continue;
-        id x = d->in_progress_drop.path_map[mime];
+    // The keys are numbered consecutively from zero so that the uri-list is in
+    // the same order as the dragged items, unlike dictionary iteration order.
+    for (unsigned i = 0;; i++) {
+        id x = path_map[[NSString stringWithFormat:@"kitty-internal/uri-list-item-%u", i]];
+        if (x == nil) break;
         if ([x isKindOfClass:[NSError class]]) {
             d->in_progress_drop.data_map[@"text/uri-list"] = x;
             return;
@@ -1637,21 +1725,54 @@ build_uri_list(_GLFWDropData *d) {
     bool from_self = ([sender draggingSource] != nil);
     _GLFWDropData *d = &window->ns.drop_data;
     if (!reset_drop_copy_mimes(d)) return NO;
-    NSError *mkdirError = nil;
-    NSURL *tempDirURL = [[NSFileManager defaultManager] URLForDirectory:NSItemReplacementDirectory
-                                                               inDomain:NSUserDomainMask
-                                                      appropriateForURL:[NSURL fileURLWithPath:NSTemporaryDirectory()]
-                                                                 create:YES
-                                                                  error:&mkdirError];
-    if (!tempDirURL) {
-        NSLog(@"Failed to create temp dir for file promises: %@", mkdirError);
-        return NO;
+    NSPasteboard *pasteboard = [sender draggingPasteboard];
+    NSArray<NSFilePromiseReceiver *> *receivers = [pasteboard readObjectsForClasses:@[ [NSFilePromiseReceiver class] ] options:nil];
+    if (_glfw.hints.init.debugRendering) {
+        NSMutableString *types = [NSMutableString stringWithString:@"Drop pasteboard types:"];
+        for (NSPasteboardType type in [pasteboard types]) [types appendFormat:@" %@", type];
+        for (NSFilePromiseReceiver *receiver in receivers)
+            [types appendFormat:@"\n\tfile promise for types: %@", [receiver.fileTypes componentsJoinedByString:@" "]];
+        debug("%s\n", [types UTF8String]);
+    }
+    // When files are promised, any file URLs on the pasteboard point to the
+    // sender's staging copies, which fulfilling the promises invalidates, as
+    // fulfillment moves rather than copies them. So the uri-list has to be
+    // built from the fulfilled paths instead, see build_uri_list(). For
+    // instance, the macOS screenshot thumbnail stages its file in
+    // TemporaryItems/NSIRD_screencaptureui_XXXXXX and deletes it once the drag
+    // is over.
+    bool has_file_promises = false;
+    for (NSFilePromiseReceiver *receiver in receivers) {
+        if (file_promise_is_for_a_file(receiver, from_self)) {
+            has_file_promises = true;
+            break;
+        }
+    }
+    NSURL *tempDirURL = nil;
+    if ([receivers count] > 0) {
+        // Note that NSItemReplacementDirectory is deliberately not used, even
+        // though that is the API meant for receiving file promises. It creates
+        // the directory inside TemporaryItems, which we are not allowed to
+        // open, so deleting the directory afterwards fails, and unlike an item
+        // being replaced, these files have to outlive the drop, see
+        // glfwCocoaPreserveDroppedFilePromises().
+        NSString *name = [NSString stringWithFormat:@"kitty-dropped-files-%@", [[NSProcessInfo processInfo] globallyUniqueString]];
+        tempDirURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name] isDirectory:YES];
+        NSError *mkdirError = nil;
+        if (![[NSFileManager defaultManager] createDirectoryAtURL:tempDirURL
+                                      withIntermediateDirectories:YES
+                                                       attributes:@{NSFilePosixPermissions : @(0700)}
+                                                            error:&mkdirError]) {
+            NSLog(@"Failed to create temp dir for file promises: %@", mkdirError);
+            return NO;
+        }
     }
     d->in_progress_drop.data_map = [[NSMutableDictionary alloc] init];
-    NSPasteboard *pasteboard = [sender draggingPasteboard];
-    NSMutableArray<NSURL *> *urls = [NSMutableArray array];
-    for (NSURL *url in [pasteboard readObjectsForClasses:@[ [NSURL class] ] options:nil]) [urls addObject:url];
-    if ([urls count] > 0) create_uri_list(d, urls);
+    if (!has_file_promises) {
+        NSMutableArray<NSURL *> *urls = [NSMutableArray array];
+        for (NSURL *url in [pasteboard readObjectsForClasses:@[ [NSURL class] ] options:nil]) [urls addObject:url];
+        if ([urls count] > 0) create_uri_list(d, urls);
+    }
     NSMutableArray<NSString *> *texts = [NSMutableArray array];
     for (NSString *text in [pasteboard readObjectsForClasses:@[ [NSString class] ] options:nil]) [texts addObject:text];
     if ([texts count] > 0) {
@@ -1670,34 +1791,33 @@ build_uri_list(_GLFWDropData *d) {
             d->in_progress_drop.data_map[@(mime)] = s;
         }
     }
-    NSArray *receivers = [pasteboard readObjectsForClasses:@[ [NSFilePromiseReceiver class] ] options:nil];
     if ([receivers count] > 0) {
         d->in_progress_drop.request_id = ++window->ns.drop_request_counter;
         unsigned long long request_id = d->in_progress_drop.request_id;
         GLFWid wid = window->id;
         NSOperationQueue *workQueue = [[[NSOperationQueue alloc] init] autorelease];
+        // Serialize the readers, they all mutate results
+        workQueue.maxConcurrentOperationCount = 1;
         dispatch_group_t promiseGroup = dispatch_group_create();
         NSMutableDictionary *results = [[NSMutableDictionary alloc] init];
         unsigned url_counter = 0;
         for (NSFilePromiseReceiver *receiver in receivers) {
             dispatch_group_enter(promiseGroup);
             NSArray<NSString *> *types = receiver.fileTypes;
-            unsigned url_list_idx = 0;
-            for (NSString *type in types) {
-                UTType *promisedType = [UTType typeWithIdentifier:type];
-                if (promisedType && [promisedType conformsToType:UTTypeFileURL]) {
-                    url_list_idx = ++url_counter;
-                    break;
-                }
-            }
+            const bool is_for_a_file = file_promise_is_for_a_file(receiver, from_self);
+            const unsigned url_list_idx = is_for_a_file ? url_counter++ : 0;
             [receiver receivePromisedFilesAtDestination:tempDirURL
                                                 options:@{}
                                          operationQueue:workQueue
                                                  reader:^(NSURL *_Nonnull fileURL, NSError *_Nullable error) {
-                                                   if (url_list_idx)
-                                                       results[[NSString stringWithFormat:@"kitty-internal/uri-list-item-%u", url_list_idx - 1]] =
-                                                           error ? error : fileURL;
-                                                   else {
+                                                   // A promise of a file contributes its path to the uri-list
+                                                   if (is_for_a_file)
+                                                       results[[NSString stringWithFormat:@"kitty-internal/uri-list-item-%u", url_list_idx]] =
+                                                           error ? (id)error : (id)fileURL;
+                                                   // and the contents are made available under the MIME types of the promised data
+                                                   for (NSString *type in types) {
+                                                       const char *mime = uti_to_mime(type);
+                                                       if (!mime || !mime[0] || results[@(mime)] != nil) continue;
                                                        id result = error;
                                                        if (!result) {
                                                            NSInputStream *s = [NSInputStream inputStreamWithURL:fileURL];
@@ -1705,15 +1825,17 @@ build_uri_list(_GLFWDropData *d) {
                                                            if ([s streamStatus] == NSStreamStatusError) result = [s streamError];
                                                            else result = s;
                                                        }
-                                                       for (NSString *type in types) {
-                                                           const char *mime = uti_to_mime(type);
-                                                           if (mime) results[@(mime)] = result;
-                                                       }
+                                                       results[@(mime)] = result;
                                                    }
                                                    dispatch_group_leave(promiseGroup);
                                                  }];
         }
         dispatch_group_notify(promiseGroup, dispatch_get_main_queue(), ^{
+          if (_glfw.hints.init.debugRendering) {
+              NSMutableString *s = [NSMutableString stringWithString:@"Drop file promises fulfilled:"];
+              for (NSString *key in results) [s appendFormat:@"\n\t%@ -> %@", key, results[key]];
+              debug("%s\n", [s UTF8String]);
+          }
           _GLFWwindow *w = NULL;
           for (_GLFWwindow *ww = _glfw.windowListHead; ww; ww = ww->next) {
               if (ww->id == wid) {
@@ -1731,6 +1853,8 @@ build_uri_list(_GLFWDropData *d) {
                   for (NSString *mime in d->in_progress_drop.pending_requests) { send_data_available_event_on_next_event_loop_tick(wid, [mime UTF8String]); }
               }
           } else {
+              // The drop this belonged to is long gone, discard the fulfilled files
+              [results release];
               NSError *error = nil;
               [[NSFileManager defaultManager] removeItemAtURL:tempDirURL error:&error];
           }
@@ -1828,6 +1952,38 @@ _glfwPlatformReadAvailableDropData(GLFWwindow *w, GLFWDropEvent *ev, char *buffe
 void
 _glfwPlatformEndDrop(GLFWwindow *w UNUSED, GLFWDragOperationType op UNUSED) {
     free_drop_data((_GLFWwindow *)w);
+}
+
+// Transfer ownership of the temporary directory holding the files fulfilled
+// from the file promises of the in progress drop to the caller, so that it is
+// not deleted when the drop ends. Returns the path to the directory or NULL if
+// this drop has no files fulfilled from promises. The returned string is valid
+// till the next call to this function. Must be called before the drop is
+// finished.
+GLFWAPI const char *
+glfwCocoaPreserveDroppedFilePromises(GLFWwindow *w) {
+    static char path_buf[4096];
+    path_buf[0] = 0;
+    @autoreleasepool {
+        _GLFWwindow *window = (_GLFWwindow *)w;
+        _GLFWDropData *d = &window->ns.drop_data;
+        NSDictionary *path_map = d->in_progress_drop.path_map;
+        if (!d->in_progress_drop.temp_dir || !path_map) return NULL;
+        bool has_files = false;
+        for (NSString *mime in path_map) {
+            if ([path_map[mime] isKindOfClass:[NSURL class]]) {
+                has_files = true;
+                break;
+            }
+        }
+        if (!has_files) return NULL;
+        const char *path = [(NSURL *)d->in_progress_drop.temp_dir fileSystemRepresentation];
+        if (!path || !path[0]) return NULL;
+        snprintf(path_buf, sizeof(path_buf), "%s", path);
+        d->in_progress_drop.keep_temp_dir = true;
+        debug("Preserving dropped file promises in: %s\n", path_buf);
+    }
+    return path_buf;
 }
 // }}}
 
@@ -1964,6 +2120,18 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
             _glfw.ns.text[0] = 0;
         }
     }
+    // Outside key handling there is no key event to accumulate text for. This
+    // path already commits immediately, so do not constrain a full IME result
+    // to the fixed-size buffer used by the key handlers.
+    if (!in_key_handler) {
+        if (!is_ascii_control_char(utf8[0])) {
+            debug_input("Sending text to kitty from insertText called from event loop: %s\n", utf8);
+            GLFWkeyevent glfw_keyevent = {.text = utf8, .ime_state = GLFW_IME_COMMIT_TEXT};
+            _glfwInputKeyboard(window, &glfw_keyevent);
+        }
+        _glfw.ns.text[0] = 0;
+        return;
+    }
     // insertText can be called multiple times for a single key event
     size_t existing_length = strnlen(_glfw.ns.text, sizeof(_glfw.ns.text));
     size_t required_length = strlen(utf8) + 1;
@@ -1971,9 +2139,9 @@ _glfwPlatformUpdateIMEState(_GLFWwindow *w, const GLFWIMEUpdateEvent *ev) {
     if (available_length >= required_length) {
         memcpy(_glfw.ns.text + existing_length, utf8, required_length); // copies the null terminator from utf8 as well
         _glfw.ns.text[sizeof(_glfw.ns.text) - 1] = 0;
-        if ((!in_key_handler || in_key_handler == 2) && _glfw.ns.text[0]) {
+        if (in_key_handler == 2 && _glfw.ns.text[0]) {
             if (!is_ascii_control_char(_glfw.ns.text[0])) {
-                debug_input("Sending text to kitty from insertText called from %s: %s\n", in_key_handler ? "flagsChanged" : "event loop", _glfw.ns.text);
+                debug_input("Sending text to kitty from insertText called from flagsChanged: %s\n", _glfw.ns.text);
                 GLFWkeyevent glfw_keyevent = {.text = _glfw.ns.text, .ime_state = GLFW_IME_COMMIT_TEXT};
                 _glfwInputKeyboard(window, &glfw_keyevent);
             }
@@ -2307,7 +2475,8 @@ createNativeWindow(_GLFWwindow *window, const _GLFWwndconfig *wndconfig, const _
         }
 
         if (wndconfig->resizable) {
-            const NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorManaged;
+            const NSWindowCollectionBehavior behavior =
+                NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAllowsTiling | NSWindowCollectionBehaviorManaged;
             [window->ns.object setCollectionBehavior:behavior];
         }
 

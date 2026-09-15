@@ -55,6 +55,7 @@ typedef struct {
     pthread_t io_thread, talk_thread;
 
     int talk_fd, listen_fd;
+    int benchmark_wakeup_fd;
     Message *messages;
     size_t messages_capacity, messages_count;
     LoopData io_loop_data;
@@ -176,6 +177,7 @@ new_childmonitor_object(PyTypeObject *type, PyObject *args, PyObject UNUSED *kwd
     if (!init_loop_data(&self->io_loop_data, KITTY_HANDLED_SIGNALS)) return PyErr_SetFromErrno(PyExc_OSError);
     self->talk_fd = talk_fd;
     self->listen_fd = listen_fd;
+    self->benchmark_wakeup_fd = -1;
     if (self == NULL) return PyErr_NoMemory();
     self->death_notify = death_notify;
     Py_INCREF(death_notify);
@@ -502,6 +504,24 @@ shutdown_monitor(ChildMonitor *self, PyObject *a UNUSED) {
     Py_RETURN_NONE;
 }
 
+static PyObject *
+set_wakeup_fd(ChildMonitor *self, PyObject *args) {
+#define set_wakeup_fd_doc "set_wakeup_fd(fd) -> Set a fd to write to instead of waking the main loop (for benchmarking)."
+    int fd;
+    if (!PyArg_ParseTuple(args, "i", &fd)) return NULL;
+    self->benchmark_wakeup_fd = fd;
+    Py_RETURN_NONE;
+}
+
+static bool parse_input(ChildMonitor *self);
+
+static PyObject *
+parse_input_once(ChildMonitor *self, PyObject *a UNUSED) {
+#define parse_input_once_doc "parse_input_once() -> Call parse_input once. Returns True if any input was consumed."
+    if (parse_input(self)) { Py_RETURN_TRUE; }
+    Py_RETURN_FALSE;
+}
+
 static bool
 do_parse(ChildMonitor *self, Screen *screen, monotonic_t now, bool flush) {
     ParseData pd = {.dump_callback = self->dump_callback, .now = now};
@@ -534,7 +554,7 @@ parse_input(ChildMonitor *self) {
         if (kill_signal_received) {
             global_state.quit_request = IMPERATIVE_CLOSE_REQUESTED;
             global_state.has_pending_closes = true;
-            request_tick_callback();
+            if (self->benchmark_wakeup_fd < 0) request_tick_callback();
             kill_signal_received = false;
         } else if (reload_config_signal_received) {
             reload_config_signal_received = false;
@@ -1024,6 +1044,7 @@ render_prepared_os_window(
                 draw_cells(trd, os_window, i == tab->active_window, true, false, NULL, now);
         }
     }
+    draw_rounded_borders(br, active_window_bg, num_visible_windows, all_windows_have_same_bg, os_window);
     setup_os_window_for_rendering(os_window, tab, active_window, false, now);
     if (global_state.thumbnail_callback.os_window == os_window->id) {
         thumbnail_callback(os_window);
@@ -1355,7 +1376,13 @@ close_os_window(ChildMonitor *self, OSWindow *os_window) {
     if (os_window->handle && !global_state.is_wayland) glfwGetWindowPos(os_window->handle, &x, &y);
     bool is_layer_shell = os_window->is_layer_shell;
     bool was_maximized = false;
-    if (os_window->handle && !is_layer_shell) { was_maximized = glfwGetWindowAttrib(os_window->handle, GLFW_MAXIMIZED) != 0; }
+    if (os_window->handle && !is_layer_shell) {
+        if (os_window->before_fullscreen.is_set && is_os_window_fullscreen(os_window)) {
+            was_maximized = os_window->before_fullscreen.was_maximized;
+        } else {
+            was_maximized = glfwGetWindowAttrib(os_window->handle, GLFW_MAXIMIZED) != 0;
+        }
+    }
     destroy_os_window(os_window);
     call_boss(on_os_window_closed, "KiiiiOO", os_window->id, x, y, w, h, was_maximized ? Py_True : Py_False, is_layer_shell ? Py_True : Py_False);
     for (size_t t = 0; t < os_window->num_tabs; t++) {
@@ -1812,8 +1839,8 @@ io_loop(void *data) {
             ret = poll(children_fds, self->count + EXTRA_FDS, -1);
         }
         if (ret > 0) {
-            if (children_fds[0].revents && POLLIN) drain_fd(children_fds[0].fd); // wakeup
-            if (children_fds[1].revents && POLLIN) {
+            if (children_fds[0].revents & POLLIN) drain_fd(children_fds[0].fd); // wakeup
+            if (children_fds[1].revents & POLLIN) {
                 SignalSet ss = {0};
                 data_received = true;
                 read_signals(children_fds[1].fd, handle_signal, &ss);
@@ -1861,11 +1888,14 @@ io_loop(void *data) {
         } else if (ret < 0) {
             if (errno != EAGAIN && errno != EINTR) { perror("Call to poll() failed"); }
         }
-#define WAKEUP                          \
-    {                                   \
-        wakeup_main_loop();             \
-        last_main_loop_wakeup_at = now; \
-        has_pending_wakeups = false;    \
+#define WAKEUP                                                                               \
+    {                                                                                        \
+        if (self->benchmark_wakeup_fd >= 0) {                                                \
+            static const char _wakeup_byte = 1;                                              \
+            ssize_t _wakeup_ret UNUSED = write(self->benchmark_wakeup_fd, &_wakeup_byte, 1); \
+        } else wakeup_main_loop();                                                           \
+        last_main_loop_wakeup_at = now;                                                      \
+        has_pending_wakeups = false;                                                         \
     }
         // we only wakeup the main loop after input_delay as wakeup is an expensive operation
         // on some platforms, such as cocoa
@@ -2299,7 +2329,7 @@ static PyMethodDef methods[] = {
     METHOD(add_child, METH_VARARGS) METHOD(inject_peer, METH_O) METHOD(needs_write, METH_VARARGS) METHOD(start, METH_NOARGS) METHOD(wakeup, METH_NOARGS)
         METHOD(shutdown_monitor, METH_NOARGS) METHOD(main_loop, METH_NOARGS) METHOD(mark_for_close, METH_VARARGS) METHOD(resize_pty, METH_VARARGS)
             METHODB(handled_signals, METH_NOARGS),
-    {"set_iutf8_winid", (PyCFunction)pyset_iutf8, METH_VARARGS, ""},
+    METHOD(set_wakeup_fd, METH_VARARGS) METHOD(parse_input_once, METH_NOARGS){"set_iutf8_winid", (PyCFunction)pyset_iutf8, METH_VARARGS, ""},
     {NULL} /* Sentinel */
 };
 

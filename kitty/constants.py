@@ -41,9 +41,12 @@ _slangc: tuple[str, ...] = ()
 def slangc() -> tuple[str, ...]:
     global _slangc
     if not _slangc:
-        from kitty.fast_data_types import Shlex
+        from kitty.fast_data_types import DEVELOP_ROOT, Shlex
 
-        _slangc = tuple(Shlex(os.environ.get('SLANGC', 'slangc'), False))
+        if DEVELOP_ROOT:
+            _slangc = (os.path.join(DEVELOP_ROOT, 'bin', 'slangc'),)
+        else:
+            _slangc = tuple(Shlex(os.environ.get('SLANGC', 'slangc'), False))
     return _slangc
 
 
@@ -217,9 +220,9 @@ def glfw_path(module: str) -> str:
 
 
 def detect_if_wayland_ok() -> bool:
-    if 'WAYLAND_DISPLAY' not in os.environ and 'WAYLAND_SOCKET' not in os.environ:
+    if not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('WAYLAND_SOCKET'):
         return False
-    if 'KITTY_DISABLE_WAYLAND' in os.environ:
+    if os.environ.get('KITTY_DISABLE_WAYLAND'):
         return False
     wayland = glfw_path('wayland')
     if not os.path.exists(wayland):

@@ -215,6 +215,12 @@ typedef struct {
     } paused_rendering;
     CharsetState charset;
     ListOfChars *lc;
+    struct {
+        // Memoized text cache indices for the ('\t', diff) text written by
+        // screen_tab(), keyed by diff. Entries are idx + 1 with 0 meaning
+        // unset. Must be cleared when the text cache is garbage collected.
+        char_type idx_plus_1[16];
+    } tab_cache;
     monotonic_t parsing_at;
     ExtraCursors extra_cursors;
     struct {
@@ -302,6 +308,7 @@ void report_mode_status(Screen *self, unsigned int which, bool);
 void screen_apply_selection(Screen *self, void *address, size_t size);
 bool screen_is_selection_dirty(Screen *self);
 bool screen_has_selection(Screen *);
+bool screen_is_cell_selected(Screen *, index_type x, index_type y);
 bool screen_invert_colors(Screen *self);
 void screen_update_cell_data(Screen *self, void *address, FONTS_DATA_HANDLE, bool cursor_has_moved);
 bool screen_is_cursor_visible(const Screen *self);

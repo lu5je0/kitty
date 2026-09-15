@@ -216,7 +216,10 @@ translateState(int state) {
     if (state & LockMask) mods |= GLFW_MOD_CAPS_LOCK;
     if (state & Mod2Mask) mods |= GLFW_MOD_NUM_LOCK;
 
-    return mods;
+    // Only button/DND events reach here; key events get their modifiers from the
+    // xkb state, which is remapped in glfw_xkb_update_modifiers(). Remap here too
+    // so mouse_map and map agree on X11.
+    return _glfwApplyModifierRemap(mods);
 }
 
 // Sends an EWMH or ICCCM event to the window manager
@@ -1305,11 +1308,20 @@ handle_xi_motion_event(_GLFWwindow *window, XIDeviceEvent *de) {
             scroll_valuator_found = true;
             if (!v->initialized) {
                 v->initialized = true;
-                v->value = value;
-                continue;
+                if (!v->has_value) {
+                    v->has_value = true;
+                    v->value = value;
+                    continue;
+                }
+                const double max_plausible_delta = 10. * (v->increment != 0. ? fabs(v->increment) : 1.);
+                if (fabs(value - v->value) > max_plausible_delta) {
+                    v->value = value;
+                    continue;
+                }
             }
             double delta = value - v->value;
             v->value = value;
+            v->has_value = true;
             delta *= -1;
             double *off = v->is_vertical ? &yOffset : &xOffset;
             *off = delta;
@@ -2015,7 +2027,7 @@ processEvent(XEvent *event) {
         }
 
         case LeaveNotify: {
-            resetScrollValuators();
+            if (event->xcrossing.mode == NotifyNormal && event->xcrossing.detail != NotifyInferior) resetScrollValuators();
             _glfwInputCursorEnter(window, false);
             return;
         }

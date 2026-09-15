@@ -31,7 +31,7 @@ choices_for_palette_generate = typing.Literal['fixed', 'semantic', 'legacy']
 choices_for_placement_strategy = typing.Literal['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right']
 choices_for_pointer_shape_when_grabbed = choices_for_default_pointer_shape
 choices_for_progress_bar = typing.Literal['left', 'right', 'top', 'bottom', 'hidden']
-choices_for_scrollbar = typing.Literal['scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered']
+choices_for_scrollbar = typing.Literal['scrolled', 'always', 'never', 'hovered', 'scrolled-and-hovered', 'scrolled-or-hovered']
 choices_for_strip_trailing_spaces = typing.Literal['always', 'never', 'smart']
 choices_for_tab_bar_align = typing.Literal['start', 'center', 'end', 'left', 'right']
 choices_for_tab_bar_style = typing.Literal['fade', 'hidden', 'powerline', 'separator', 'slant', 'custom']
@@ -429,6 +429,7 @@ option_names = (
     'preedit_background',
     'preedit_foreground',
     'progress_bar',
+    'remap_modifiers',
     'remember_window_position',
     'remember_window_size',
     'remote_control_password',
@@ -508,6 +509,7 @@ option_names = (
     'wheel_scroll_min_lines',
     'wheel_scroll_multiplier',
     'window_alert_on_bell',
+    'window_border_radius',
     'window_border_width',
     'window_drag_tolerance',
     'window_logo_alpha',
@@ -647,6 +649,7 @@ class Options:
     preedit_background: kitty.fast_data_types.Color | None = None
     preedit_foreground: kitty.fast_data_types.Color | None = None
     progress_bar: choices_for_progress_bar = 'top'
+    remap_modifiers: dict[int, int] = {}
     remember_window_position: bool = False
     remember_window_size: bool = True
     repaint_delay: int = 10
@@ -723,6 +726,7 @@ class Options:
     wheel_scroll_min_lines: int = 1
     wheel_scroll_multiplier: float = 5.0
     window_alert_on_bell: bool = True
+    window_border_radius: tuple[float, str] = (0, 'pt')
     window_border_width: tuple[float, str] = (0.5, 'pt')
     window_drag_tolerance: float = 2.0
     window_logo_alpha: float = 0.5

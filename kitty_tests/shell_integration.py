@@ -32,6 +32,20 @@ def bash_ok():
     return int(major_ver) >= 5 and relstatus == 'release'
 
 
+def run_interactive_bash(command: str, env: dict[str, str], cwd: str | None = None) -> 'subprocess.CompletedProcess[bytes]':
+    """Run an interactive bash without letting it touch our controlling terminal.
+
+    An interactive bash whose stderr is not a terminal falls back to opening
+    /dev/tty to do job control on. That is the terminal the test suite is
+    itself running in, and bash makes its own process group the foreground one
+    on it for as long as it runs. When tests run in parallel, a second bash
+    started in that window sees that it is not in the foreground process group
+    and does kill(0, SIGTTIN), which stops the entire test run. Giving bash its
+    own session leaves it with no controlling terminal, so it cannot interfere.
+    """
+    return subprocess.run(['bash', '--noprofile', '--norc', '-ic', command], cwd=cwd, env=env, capture_output=True, start_new_session=True)
+
+
 def extract_sudo_function(content: str, opening='sudo() {', closing='}', witht='command sudo TERMINFO="$TERMINFO" "$@";', without='command sudo "$@";') -> str:
     """Extract the sudo() function from bash/zsh shell integration content using indentation."""
     lines = content.split('\n')
@@ -157,6 +171,45 @@ class ShellIntegration(BaseTest):
             func = extract_sudo_function(f.read())
         self.assertIsNotNone(func)
         self.sudo_parser_tests(['bash', '--noprofile', '--norc', '-c'], func)
+
+    @unittest.skipUnless(bash_ok(), 'bash not installed, too old, or debug build')
+    def test_bash_disabled_command_hook(self):
+        if self.with_kitten:
+            return
+        integration_script = os.path.join(shell_integration_dir, 'bash', 'kitty.bash')
+        command = 'PS0=original; source "$KITTY_BASH_INTEGRATION"; _ksi_prompt_command; printf %s "$PS0"'
+        common_options = 'enabled no-cursor no-cwd no-complete no-sudo'
+        for options, has_command_hook in (
+            ('no-title no-prompt-mark', False),
+            ('no-prompt-mark', True),
+            ('no-title', True),
+        ):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as home_dir:
+                env = basic_shell_env(home_dir)
+                env['KITTY_BASH_INTEGRATION'] = integration_script
+                env['KITTY_SHELL_INTEGRATION'] = f'{common_options} {options}'
+                cp = run_interactive_bash(command, env)
+                self.assertEqual(cp.returncode, 0, cp.stderr.decode())
+                self.assertEqual(cp.stdout.decode() != 'original', has_command_hook)
+
+    @unittest.skipUnless(bash_ok(), 'bash not installed, too old, or debug build')
+    def test_bash_ssh_hostname_fallback(self):
+        if self.with_kitten:
+            return
+        integration_script = os.path.join(shell_integration_dir, 'bash', 'kitty.bash')
+        command = 'PS1="prompt> "; source "$KITTY_BASH_INTEGRATION"; _ksi_prompt_command; printf %s "${PS1@P}"'
+        with tempfile.TemporaryDirectory() as home_dir:
+            home_dir = os.path.realpath(home_dir)
+            who = os.path.join(home_dir, 'who')
+            with open(who, 'w') as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' 'user pts/0 (192.0.2.1)'\n")
+            os.chmod(who, 0o755)
+            env = basic_shell_env(home_dir)
+            env['KITTY_BASH_INTEGRATION'] = integration_script
+            env['PATH'] = os.pathsep.join((home_dir, env['PATH']))
+            cp = run_interactive_bash(command, env, cwd=home_dir)
+            self.assertEqual(cp.returncode, 0, cp.stderr.decode())
+            self.assertIn(': ~\x07', cp.stdout.decode())
 
     @unittest.skipUnless(shutil.which('fish'), 'fish not installed')
     def test_fish_sudo_parser(self):

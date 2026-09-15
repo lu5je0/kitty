@@ -141,7 +141,7 @@ from .keys import Mappings
 from .layout.base import set_layout_options
 from .notifications import NotificationManager
 from .options.types import Options, nullable_colors
-from .options.utils import MINIMUM_FONT_SIZE, KeyboardMode, KeyDefinition
+from .options.utils import KeyboardMode, KeyDefinition, clamp_font_size
 from .os_window_size import initial_window_size_func
 from .session import (
     Session,
@@ -164,6 +164,7 @@ from .utils import (
     get_editor,
     get_new_os_window_size,
     is_ok_to_read_image_file,
+    is_ok_to_read_image_path,
     is_path_in_temp_dir,
     less_version,
     log_error,
@@ -188,6 +189,9 @@ if TYPE_CHECKING:
 # }}}
 
 RCResponse = Union[dict[str, Any], None, AsyncResponse]
+
+# How long files dropped onto kitty as macOS file promises are kept alive for, in seconds
+DROPPED_FILE_PROMISES_LIFETIME = 600.0
 
 ThumbnailCallback = Callable[[int, int, bytes, int, int], None]
 
@@ -470,7 +474,7 @@ class Boss:
         with Window.set_ignore_focus_changes_for_new_windows():
             for startup_session in si:
                 # The window state from the CLI options will override and apply to every single OS window in startup session
-                wstate = self.args.start_as if self.args.start_as and self.args.start_as != 'normal' else None
+                wstate = self.args.start_as if self.args.start_as and self.args.start_as != 'normal' else None  # ty: ignore[redundant-condition]
                 wid = self.add_os_window(startup_session, window_state=wstate, os_window_id=os_window_id)
                 if startup_session.focus_os_window:
                     focused_os_window = wid
@@ -1063,7 +1067,7 @@ class Boss:
                                 assert isinstance(window.launch_spec, LaunchSpec)
                                 launch(get_boss(), window.launch_spec.opts, window.launch_spec.args)
                     continue
-                wstate = args.start_as if args.start_as and args.start_as != 'normal' else None
+                wstate = args.start_as if args.start_as and args.start_as != 'normal' else None  # ty: ignore[redundant-condition]
                 os_window_id = self.add_os_window(
                     session,
                     wclass=args.cls,
@@ -1748,12 +1752,10 @@ class Boss:
             self.show_error(_('Unknown clear type'), _('The clear type: {} is unknown').format(action))
 
     def increase_font_size(self) -> None:  # legacy
-        cfs = global_font_size()
-        self.set_font_size(min(get_options().font_size * 5, cfs + 2.0))
+        self.set_font_size(global_font_size() + 2.0)
 
     def decrease_font_size(self) -> None:  # legacy
-        cfs = global_font_size()
-        self.set_font_size(max(MINIMUM_FONT_SIZE, cfs - 2.0))
+        self.set_font_size(global_font_size() - 2.0)
 
     def restore_font_size(self) -> None:  # legacy
         self.set_font_size(get_options().font_size)
@@ -1789,7 +1791,7 @@ class Boss:
                             pass  # no-op
                 else:
                     new_size = amt
-                new_size = max(MINIMUM_FONT_SIZE, min(new_size, get_options().font_size * 10))
+                new_size = clamp_font_size(new_size, get_options().font_size)
             return new_size
 
         if all_windows:
@@ -2290,6 +2292,21 @@ class Boss:
         elif tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom:
             if (tab_id := tm.tab_bar.tab_id_at(x, y)) and (tab := self.tab_for_id(tab_id)) and (w := tab.active_window):
                 w.on_drop(drop)
+
+    def dropped_file_promises_dir(self, path: str) -> None:
+        # Called by the C code on macOS with the temporary directory holding the
+        # files a drop of file promises was fulfilled into. Their paths are what
+        # is given to the program running in the window, so the files must
+        # outlive the drop. Keep them around for a while, ensuring they are
+        # removed even if kitty is killed before that.
+        self.atexit.rmtree(path)
+
+        def remove_dropped_files(timer_id: int | None) -> None:
+            import shutil
+
+            shutil.rmtree(path, ignore_errors=True)
+
+        add_timer(remove_dropped_files, DROPPED_FILE_PROMISES_LIFETIME, False)
 
     def on_drag_source_finished(
         self, was_dropped: bool, was_canceled: bool, accepted_mime_type: str, action: int, data: dict[str, bytes] | None, needs_toplevel_on_wayland: bool
@@ -2914,13 +2931,14 @@ class Boss:
         self.open_url(website_url())
 
     @ac('misc', 'Open the specified URL')
-    def open_url(self, url: str, program: str | list[str] | None = None, cwd: str | None = None) -> None:
+    def open_url(self, url: str | list[str], program: str | list[str] | None = None, cwd: str | None = None) -> None:
         if not url:
             return
         if isinstance(program, str):
             program = to_cmdline(program)
         found_action = False
         if program is None:
+            assert isinstance(url, str)
             from .open_actions import actions_for_url
 
             actions = list(actions_for_url(url))
@@ -3557,6 +3575,9 @@ class Boss:
         if is_path_in_temp_dir(path):
             with suppress(FileNotFoundError):
                 os.remove(path)
+
+    def is_ok_to_read_image_path(self, path: str) -> bool:
+        return is_ok_to_read_image_path(path)
 
     def is_ok_to_read_image_file(self, path: str, fd: int) -> bool:
         return is_ok_to_read_image_file(path, fd)

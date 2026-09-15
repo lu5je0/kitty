@@ -898,7 +898,7 @@ typedef enum {
     GLFW_GRAB_CURSOR,
     GLFW_GRABBING_CURSOR,
     GLFW_INVALID_CURSOR,
-    /* end mouse cursor shapes */
+/* end mouse cursor shapes */
 } GLFWCursorShape;
 /*! @} */
 
@@ -2243,6 +2243,10 @@ typedef void (*glfwSetIgnoreOSKeyboardProcessing_func)(bool);
 GFW_EXTERN glfwSetIgnoreOSKeyboardProcessing_func glfwSetIgnoreOSKeyboardProcessing_impl;
 #define glfwSetIgnoreOSKeyboardProcessing glfwSetIgnoreOSKeyboardProcessing_impl
 
+typedef void (*glfwSetModifierRemap_func)(const int*);
+GFW_EXTERN glfwSetModifierRemap_func glfwSetModifierRemap_impl;
+#define glfwSetModifierRemap glfwSetModifierRemap_impl
+
 typedef bool (*glfwGrabKeyboard_func)(int);
 GFW_EXTERN glfwGrabKeyboard_func glfwGrabKeyboard_impl;
 #define glfwGrabKeyboard glfwGrabKeyboard_impl
@@ -2530,6 +2534,10 @@ GFW_EXTERN glfwCocoaSetWindowChrome_func glfwCocoaSetWindowChrome_impl;
 typedef void (*glfwCocoaRegisterMIMETypes_func)(GLFWwindow*, const char**, size_t);
 GFW_EXTERN glfwCocoaRegisterMIMETypes_func glfwCocoaRegisterMIMETypes_impl;
 #define glfwCocoaRegisterMIMETypes glfwCocoaRegisterMIMETypes_impl
+
+typedef const char* (*glfwCocoaPreserveDroppedFilePromises_func)(GLFWwindow*);
+GFW_EXTERN glfwCocoaPreserveDroppedFilePromises_func glfwCocoaPreserveDroppedFilePromises_impl;
+#define glfwCocoaPreserveDroppedFilePromises glfwCocoaPreserveDroppedFilePromises_impl
 
 typedef void (*glfwCocoaSetWindowLevel_func)(GLFWwindow*, const char*);
 GFW_EXTERN glfwCocoaSetWindowLevel_func glfwCocoaSetWindowLevel_impl;

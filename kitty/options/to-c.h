@@ -79,7 +79,10 @@ scrollbar(PyObject *src) {
         case 'a': return SCROLLBAR_ALWAYS;
         case 'n': return SCROLLBAR_NEVER;
         case 'h': return SCROLLBAR_ON_HOVERED;
-        case 's': return strcmp(q, "scrolled") == 0 ? SCROLLBAR_ON_SCROLLED : SCROLLBAR_ON_SCROLL_AND_HOVER;
+        case 's':
+            if (strcmp(q, "scrolled") == 0) return SCROLLBAR_ON_SCROLLED;
+            if (strcmp(q, "scrolled-or-hovered") == 0) return SCROLLBAR_ON_SCROLL_OR_HOVER;
+            return SCROLLBAR_ON_SCROLL_AND_HOVER;
     }
     return SCROLLBAR_ON_SCROLLED;
 }
@@ -551,6 +554,32 @@ static inline void
 box_drawing_scale(PyObject *val, Options *opts) {
     for (unsigned i = 0; i < MIN(arraysz(opts->box_drawing_scale), (size_t)PyTuple_GET_SIZE(val)); i++) {
         opts->box_drawing_scale[i] = PyFloat_AsFloat(PyTuple_GET_ITEM(val, i));
+    }
+}
+
+static inline void
+remap_modifiers(PyObject *val, Options *opts) {
+    memset(opts->modifier_remap, 0, sizeof(opts->modifier_remap));
+    opts->modifier_remap_mask = 0;
+    if (!PyDict_Check(val)) {
+        PyErr_SetString(PyExc_TypeError, "remap_modifier must be a dict");
+        return;
+    }
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(val, &pos, &key, &value)) {
+        const long src = PyLong_AsLong(key), dest = PyLong_AsLong(value);
+        if (PyErr_Occurred()) {
+            PyErr_Print();
+            PyErr_Clear();
+            continue;
+        }
+        // the parser guarantees a single source bit, but do not trust it in C
+        if (src <= 0 || (src & (src - 1)) || dest <= 0) continue;
+        const unsigned idx = (unsigned)__builtin_ctz((unsigned)src);
+        if (idx >= arraysz(opts->modifier_remap)) continue;
+        opts->modifier_remap[idx] = (int)dest;
+        opts->modifier_remap_mask |= (int)src;
     }
 }
 

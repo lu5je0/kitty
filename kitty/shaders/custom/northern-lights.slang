@@ -558,7 +558,7 @@ fragment_main(float4 color, KittyTextures t, KittyCustomShaderData d) {
     float gate = smoothCutoff(effectLum, EFFECT_FLOOR, EFFECT_CEILING);
     col *= gate;
 
-    float4 terminalColor = t.backbuffer.Sample(t.pos);
+    float4 terminalColor = t.backbuffer.Sample(uv);
     float termLum = dot(terminalColor.rgb, float3(0.299f, 0.587f, 0.114f));
     float isBlack = step(termLum, 0.001f);
     float textPreserve = 1.0f - smoothstep(BLACK_BLEND_THRESHOLD, BLACK_BLEND_THRESHOLD + 0.2f, termLum);

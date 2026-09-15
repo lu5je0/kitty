@@ -200,13 +200,13 @@ map ctrl+b>i enable_ime
 
 ## 特性：preedit 固定配色（preedit_foreground / preedit_background）
 
-**是什么**：两个新颜色选项，固定 IME 组词（pre-edit）文字的前景/背景色。默认 `none` 保持上游行为——上游是把「开始组词那一刻子进程留下的 SGR」反色来画 preedit，颜色随光标处语法高亮随机变。
+**是什么**：两个新颜色选项，固定 IME 组词（pre-edit）文字的前景/背景色。默认 `none` 保持上游行为——上游用「开始组词那一刻子进程留下的 SGR」的 fg/bg 来画 preedit，颜色随光标处语法高亮随机变（2026-02 上游起把「区分 preedit」的标记从反色改成了斜体 + highlight 色虚线，fork 的颜色覆盖叠在其上，不改上游那套标记逻辑）。
 
 **实现**（全部纯新增行）：
 
 - `kitty/options/definition.py`：colors 组 `selection_background` 之后插两个 opt（`to_color_or_none` + `ctype='color_or_none_as_int'`）
 - `kitty/state.h`：`Options` 结构体**末尾**单独一行 `color_type preedit_foreground, preedit_background;`
-- `kitty/screen.c` `screen_draw_overlay_line()`：上游 `sgr.reverse ^= true` 之后插一段——任一选项非 0 时关掉 reverse、把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游的 reverse 还原行之前恢复保存的 fg/bg/reverse。上游行一字未改
+- `kitty/screen.c` `screen_draw_overlay_line()`：在上游设置完 preedit 的 SGR（`sgr.italic/decor` 那一组）之后插一段——把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游恢复 italic/decor 的那几行之后恢复保存的 fg/bg。**上游那段 preedit SGR 标记逻辑（曾经的 `sgr.reverse ^= true`，现在是 italic+虚线）一字未改**，fork 的颜色只覆盖 fg/bg，斜体+虚线的区分保持上游行为。合并冲突时保留 fork 的保存/覆盖/恢复三段，并继续叠在上游标记逻辑之后
 - `kitty/options/{parse.py,types.py,to-c-generated.h}`、`tools/cmd/at/set_colors.go`、`tools/themes/collection.go`：生成文件，`gen/config.py` 重新生成
 
 **已知限制**：`color_or_none_as_int` 把 `none` 编码为 0，纯黑 `#000000` 也是 0，会被当成未设置（上游 `tab_bar_background` 同款限制），要黑色用 `#010101`。
@@ -230,6 +230,14 @@ map ctrl+b>i enable_ime
 3. `./dev.sh build` 重新构建（需 Go 工具链；国内网络建议挂代理 `export https_proxy=...`）
 4. `./test.py` 跑测试，尤其 `--module ime_mode` 和 `--module ime_e2e`
 5. 验证：**`open -n kitty/launcher/kitty.app`**（一定要带 `-n`，否则 macOS 按 bundle id 匹配，只会把已在跑的 `/Applications/kitty.app` 切到前台，你测的是旧二进制）。检查 tab 点击/关闭/新建、窗口圆角、标题栏无分隔线阴影；切到中文输入法后在 vim 里 normal 模式应无法组词、按 `i` 进 insert 后恢复正常，且 `cmd+i` 这类 key equivalent 仍要生效（见"两条踩过的坑"）
+
+### 合并历史（记录当时怎么解的，供下次参考）
+
+- **2026-09 合并 upstream/master（249 commits）**：唯一带冲突的是 `kitty/options/parse.py`（`kitty/options/utils` 的 import 列表）和 `kitty/screen.c`。
+  - `parse.py`：两边 import 列表都改了同一段，手动合成并集（fork 的 `deprecated_macos_titlebar_tabs_alias` + 上游的 `remap_modifiers` 等），再校验所有名字都能从 `kitty/options/utils` 解析到。
+  - `screen.c` `screen_draw_overlay_line()`：上游把 preedit 的标记从 `sgr.reverse ^= true` 改成了 italic + highlight 色虚线，和 fork 的 `preedit_foreground/background` 覆盖改同一段。解为：保留上游整套 italic/虚线逻辑，fork 只在其后覆盖 fg/bg、并在上游恢复行之后恢复，不再碰 `reverse`。
+  - 生成文件（`types.py`/`to-c-generated.h`/两个 Go 文件）自动合并成功，已用脚本校验是两边父提交的**严格超集**。**注意**：本机 `gen/config.py`（以及上游自身）在 Python 3.14 下跑不起来（`assert isinstance(func, types.FunctionType)` 失败，`str`/`float` 等内建类型不再是 `FunctionType`），所以本次没有重新生成、改为手工校验一致性；上游哪天修了再恢复 `kitty +launch gen config` 流程。
+- **已知的自动合并陷阱**：`kitty/glfw-wrapper.{h,c}` 由 `cd glfw && python3 glfw.py` 生成，但它末尾会调 `autoformat`，而本机没有 `ruff`，会在 `ruff` 步骤报错退出并留下**半格式化**产物（例如把 `/* end mouse cursor shapes */` 的缩进改掉）。看到无关的格式 diff 直接 `git checkout -- kitty/glfw-wrapper.*` 丢弃即可；fork 的两个符号（`glfwWaylandSetTitlebarTabs`、`glfwWaylandSetIMEInhibited`）在正常合并的 wrapper 里本就在，无需重新生成。
 
 ## 部署
 

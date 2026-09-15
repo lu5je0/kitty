@@ -19,7 +19,7 @@ typedef struct {
         uint32_t cursor_movement, compose_mode;
     };
     union {
-        uint32_t cell_x_offset;
+        uint32_t cell_x_offset, blend_mode;
     };
     union {
         uint32_t cell_y_offset, bgcolor;
@@ -135,9 +135,6 @@ typedef struct {
     uint8_t *buf;
     size_t buf_capacity, buf_used;
 
-    uint8_t *mapped_file;
-    size_t mapped_file_sz;
-
     size_t data_sz;
     uint8_t *data;
     bool is_4byte_aligned;
@@ -248,6 +245,7 @@ bool grman_update_layers(
     unsigned int num_rows,
     CellPixelSize);
 void grman_scroll_images(GraphicsManager *self, const ScrollData *, CellPixelSize fg);
+bool grman_has_any_images(GraphicsManager *self);
 void grman_resize(GraphicsManager *, index_type, index_type, index_type, index_type, index_type, index_type);
 void grman_rescale(GraphicsManager *self, CellPixelSize fg);
 void grman_remove_cell_images(GraphicsManager *self, int32_t top, int32_t bottom);
