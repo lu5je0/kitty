@@ -311,7 +311,7 @@ Wayland 上就是 titlebar buffer 的整个高度（`visible_titlebar_height`）
 ## 构建与验证
 
 ```sh
-./dev.sh build            # 需要 Go 工具链；国内网络挂代理 export https_proxy=...
+./dev.sh build            # 需要 Go 工具链
 ./test.py                 # 尤其 --module ime_mode 和 --module ime_e2e（另一个特性的回归）
 cd glfw && python3 glfw.py   # 只在动过 glfw3.h 导出或 glfw.py 清单后需要
 ./kitty/launcher/kitty +launch gen config   # 只在动过 options/definition.py 后需要

@@ -222,21 +222,24 @@ map ctrl+b>i enable_ime
 
 1. `git merge upstream/master`
 2. 冲突处理：
-   - `kitty/options/parse.py`、`types.py` 等生成文件：任选一边解决后，用 `./kitty/launcher/kitty +launch gen config` 重新生成即可
+   - `kitty/options/parse.py`、`types.py` 等生成文件：正常用 `./kitty/launcher/kitty +launch gen config` 重新生成；但本机 `gen/config.py` 在 Python 3.14 下跑不起来，只能手工并集并校验（见下）
    - `glfw/cocoa_window.m`：保持 `apply_window_corner_curve` 删除状态；`keyDown:`/`flagsChanged:` 里的 `filter_result` / `ime_disabled` 改动要保留（上游经常动这几行的 `process_text` 计算）
    - `kitty/vt-parser.c`：`case 1337:` 那行 `fork_ime_handle_osc1337(...)` 拦截要保留，且必须在 `START_DISPATCH` 之前
    - `glfw/wl_text_input.c`：fork 的 4 处纯新增（`fork_ime_inhibited`、enter 早退行、FOCUS case 拦截行 + `fork_ime_force_disable()`、末尾 `glfwWaylandSetIMEInhibited()`）要保留；`kitty/keys.c` `update_ime_focus` 开头、`kitty/glfw.c` `window_focus_callback`、`kitty/screen.c` `do_screen_reset` 各 1 行 fork-local 调用要保留
    - 其余文件冲突按上表理解语义手动合
-3. `./dev.sh build` 重新构建（需 Go 工具链；国内网络建议挂代理 `export https_proxy=...`）
+3. `./dev.sh build` 重新构建（需 Go 工具链）
 4. `./test.py` 跑测试，尤其 `--module ime_mode` 和 `--module ime_e2e`
 5. 验证：**`open -n kitty/launcher/kitty.app`**（一定要带 `-n`，否则 macOS 按 bundle id 匹配，只会把已在跑的 `/Applications/kitty.app` 切到前台，你测的是旧二进制）。检查 tab 点击/关闭/新建、窗口圆角、标题栏无分隔线阴影；切到中文输入法后在 vim 里 normal 模式应无法组词、按 `i` 进 insert 后恢复正常，且 `cmd+i` 这类 key equivalent 仍要生效（见"两条踩过的坑"）
 
-### 合并历史（记录当时怎么解的，供下次参考）
+### 合并时的长期注意事项
 
-- **2026-09 合并 upstream/master（249 commits）**：唯一带冲突的是 `kitty/options/parse.py`（`kitty/options/utils` 的 import 列表）和 `kitty/screen.c`。
-  - `parse.py`：两边 import 列表都改了同一段，手动合成并集（fork 的 `deprecated_macos_titlebar_tabs_alias` + 上游的 `remap_modifiers` 等），再校验所有名字都能从 `kitty/options/utils` 解析到。
-  - `screen.c` `screen_draw_overlay_line()`：上游把 preedit 的标记从 `sgr.reverse ^= true` 改成了 italic + highlight 色虚线，和 fork 的 `preedit_foreground/background` 覆盖改同一段。解为：保留上游整套 italic/虚线逻辑，fork 只在其后覆盖 fg/bg、并在上游恢复行之后恢复，不再碰 `reverse`。
-  - 生成文件（`types.py`/`to-c-generated.h`/两个 Go 文件）自动合并成功，已用脚本校验是两边父提交的**严格超集**。**注意**：本机 `gen/config.py`（以及上游自身）在 Python 3.14 下跑不起来（`assert isinstance(func, types.FunctionType)` 失败，`str`/`float` 等内建类型不再是 `FunctionType`），所以本次没有重新生成、改为手工校验一致性；上游哪天修了再恢复 `kitty +launch gen config` 流程。
+- **生成文件**：本机 `gen/config.py` 在 Python 3.14 下跑不起来（`assert isinstance(func, types.FunctionType)` 失败，`str`/`float` 等内建类型不再是 `FunctionType`，上游自身也一样），所以改过 `definition.py` / `utils.py` 后无法用 `kitty +launch gen config` 重新生成，只能手工让生成文件成为两边父提交的**严格超集**；上游修好后恢复生成流程。
+- **上游改动密集、且和 fork 改同一处的区域**（合并时逐个复核双方 hunk 都还在）：
+  - `glfw/cocoa_window.m` 的 `keyDown:` / `flagsChanged:`：上游常动 `process_text` 的计算，fork 的 `filter_result == 2` 约定和 `ime_disabled` 分支要保留。
+  - drag-and-drop 与 tab / window 移动：`kitty/boss.py` 的 `on_drop_move` / `on_drop` / `on_drag_source_finished` / `_insert_window_in_direction`，`kitty/tabs.py` 的 `on_window_drop_move` / `_set_drag_target_window`（上游 v0.49.0 新增“单窗口 tab 拖进别的 tab 内容区”，并抽出了 `TabManager.set_drag_over_me()`，fork 的 `_position_for_detached_window`、`_move_tab_to` 的 `x`/`y`、`on_tab_drop_move` 的 `laid_out_once` guard 要保留）。
+  - `OSWindow` 的 custom shader 动画字段：上游 v0.49.0 把 `has_active_custom_shaders` / `shader_anim_min_step` / `shader_anim_next_end_at` 收进了 `ShaderAnimState shader_anim`（`state.h` / `child-monitor.c` / `shaders.c`）；fork 的 `wayland_titlebar_tabs_active` 始终单独一行，不受影响。
+  - `kitty/screen.c` 的 `screen_draw_overlay_line()`：fork 的 preedit 颜色覆盖要一直叠在上游的 italic + 虚线标记之后。
+  - `glfw/internal.h` 的 `_GLFWlibrary.callbacks`：fork 追加的字段放最末尾。
 - **已知的自动合并陷阱**：`kitty/glfw-wrapper.{h,c}` 由 `cd glfw && python3 glfw.py` 生成，但它末尾会调 `autoformat`，而本机没有 `ruff`，会在 `ruff` 步骤报错退出并留下**半格式化**产物（例如把 `/* end mouse cursor shapes */` 的缩进改掉）。看到无关的格式 diff 直接 `git checkout -- kitty/glfw-wrapper.*` 丢弃即可；fork 的两个符号（`glfwWaylandSetTitlebarTabs`、`glfwWaylandSetIMEInhibited`）在正常合并的 wrapper 里本就在，无需重新生成。
 
 ## 部署
