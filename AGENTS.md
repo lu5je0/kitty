@@ -208,6 +208,7 @@ map ctrl+b>i enable_ime
 - `kitty/state.h`：`Options` 结构体**末尾**单独一行 `color_type preedit_foreground, preedit_background;`
 - `kitty/screen.c` `screen_draw_overlay_line()`：在上游设置完 preedit 的 SGR（`sgr.italic/decor` 那一组）之后插一段——把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游恢复 italic/decor 的那几行之后恢复保存的 fg/bg。**上游那段 preedit SGR 标记逻辑（曾经的 `sgr.reverse ^= true`，现在是 italic+虚线）一字未改**：fork 的颜色只覆盖 fg/bg，斜体/虚线也**不改上游那两行，而是在紧后面追加两行覆盖**（`sgr.italic = false;`、`sgr.decoration = 1; // straight underline`，decoration 1 = 实线、5 = 虚线，见 `kitty/line.c` 的 `decoration_as_sgr()`），保持整个 diff 为纯新增行，上游合并自动可解；上游的 save/restore 仍按原样回滚到子进程 SGR。合并冲突时保留 fork 的保存/覆盖/恢复三段 + 那两行样式覆盖，并继续叠在上游标记逻辑之后
 - `kitty/options/{parse.py,types.py,to-c-generated.h}`、`tools/cmd/at/set_colors.go`、`tools/themes/collection.go`：生成文件，`gen/config.py` 重新生成
+- `kitty_tests/screen.py` `test_ime_preedit_styling`：**这是唯一改了上游行的文件**。上游 commit `dbabd12ba` 随斜体+虚线样式一起加的断言，fork 改成 `assertFalse(c.italic)` + `decoration == 1`（实线），注释也跟着改。合并冲突时保留 fork 的断言
 
 **已知限制**：`color_or_none_as_int` 把 `none` 编码为 0，纯黑 `#000000` 也是 0，会被当成未设置（上游 `tab_bar_background` 同款限制），要黑色用 `#010101`。
 
