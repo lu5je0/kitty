@@ -4902,6 +4902,12 @@ screen_draw_overlay_line(Screen *self) {
     const color_type orig_decoration_fg = self->cursor->sgr.decoration_fg;
     self->cursor->sgr.italic = true;
     self->cursor->sgr.decoration = 5; // dashed
+    // fork: pre-edit text is rendered as plain text with a single straight underline. Override
+    // upstream's italic + dashed choice right after it instead of editing the two lines above,
+    // so merges of upstream master keep auto-resolving. The save/restore below still round-trips
+    // the original SGR, and preedit_foreground/preedit_background still override the colors.
+    self->cursor->sgr.italic = false;
+    self->cursor->sgr.decoration = 1; // straight underline
     self->cursor->sgr.decoration_fg = ((colorprofile_to_color_with_fallback(
                                             self->color_profile,
                                             self->color_profile->overridden.highlight_bg,
@@ -4912,8 +4918,8 @@ screen_draw_overlay_line(Screen *self) {
                                        << 8) |
                                       2;
     // fork: fixed pre-edit colors (preedit_foreground/preedit_background) override the SGR colors
-    // inherited from whatever the application last drew at the cursor. Upstream's italic + dashed
-    // underline distinction is deterministic so it is kept on top of the fork colors.
+    // inherited from whatever the application last drew at the cursor. The straight-underline
+    // distinction is deterministic so it is kept on top of the fork colors.
     const color_type fork_orig_fg = self->cursor->sgr.fg, fork_orig_bg = self->cursor->sgr.bg;
     if (OPT(preedit_foreground)) self->cursor->sgr.fg = ((OPT(preedit_foreground) & COL_MASK) << 8) | 2;
     if (OPT(preedit_background)) self->cursor->sgr.bg = ((OPT(preedit_background) & COL_MASK) << 8) | 2;

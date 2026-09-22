@@ -200,13 +200,13 @@ map ctrl+b>i enable_ime
 
 ## 特性：preedit 固定配色（preedit_foreground / preedit_background）
 
-**是什么**：两个新颜色选项，固定 IME 组词（pre-edit）文字的前景/背景色。默认 `none` 保持上游行为——上游用「开始组词那一刻子进程留下的 SGR」的 fg/bg 来画 preedit，颜色随光标处语法高亮随机变（2026-02 上游起把「区分 preedit」的标记从反色改成了斜体 + highlight 色虚线，fork 的颜色覆盖叠在其上，不改上游那套标记逻辑）。
+**是什么**：两个新颜色选项，固定 IME 组词（pre-edit）文字的前景/背景色。默认 `none` 保持上游行为——上游用「开始组词那一刻子进程留下的 SGR」的 fg/bg 来画 preedit，颜色随光标处语法高亮随机变（2026-02 上游起把「区分 preedit」的标记从反色改成了斜体 + highlight 色虚线，fork 的颜色覆盖叠在其上，不改上游那套标记逻辑）。**fork 另外把 preedit 的标记样式从「斜体 + 虚线」改成「非斜体 + 实线下划线」**（个人偏好：组词文字读起来就是普通文字加一条下划线）。
 
 **实现**（全部纯新增行）：
 
 - `kitty/options/definition.py`：colors 组 `selection_background` 之后插两个 opt（`to_color_or_none` + `ctype='color_or_none_as_int'`）
 - `kitty/state.h`：`Options` 结构体**末尾**单独一行 `color_type preedit_foreground, preedit_background;`
-- `kitty/screen.c` `screen_draw_overlay_line()`：在上游设置完 preedit 的 SGR（`sgr.italic/decor` 那一组）之后插一段——把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游恢复 italic/decor 的那几行之后恢复保存的 fg/bg。**上游那段 preedit SGR 标记逻辑（曾经的 `sgr.reverse ^= true`，现在是 italic+虚线）一字未改**，fork 的颜色只覆盖 fg/bg，斜体+虚线的区分保持上游行为。合并冲突时保留 fork 的保存/覆盖/恢复三段，并继续叠在上游标记逻辑之后
+- `kitty/screen.c` `screen_draw_overlay_line()`：在上游设置完 preedit 的 SGR（`sgr.italic/decor` 那一组）之后插一段——把 fg/bg 覆盖为 `((OPT(...) & COL_MASK) << 8) | 2`；函数末尾在上游恢复 italic/decor 的那几行之后恢复保存的 fg/bg。**上游那段 preedit SGR 标记逻辑（曾经的 `sgr.reverse ^= true`，现在是 italic+虚线）一字未改**：fork 的颜色只覆盖 fg/bg，斜体/虚线也**不改上游那两行，而是在紧后面追加两行覆盖**（`sgr.italic = false;`、`sgr.decoration = 1; // straight underline`，decoration 1 = 实线、5 = 虚线，见 `kitty/line.c` 的 `decoration_as_sgr()`），保持整个 diff 为纯新增行，上游合并自动可解；上游的 save/restore 仍按原样回滚到子进程 SGR。合并冲突时保留 fork 的保存/覆盖/恢复三段 + 那两行样式覆盖，并继续叠在上游标记逻辑之后
 - `kitty/options/{parse.py,types.py,to-c-generated.h}`、`tools/cmd/at/set_colors.go`、`tools/themes/collection.go`：生成文件，`gen/config.py` 重新生成
 
 **已知限制**：`color_or_none_as_int` 把 `none` 编码为 0，纯黑 `#000000` 也是 0，会被当成未设置（上游 `tab_bar_background` 同款限制），要黑色用 `#010101`。
