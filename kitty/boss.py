@@ -155,7 +155,7 @@ from .session import (
 )
 from .shaders.slang import load_shader_programs
 from .simple_cli_definitions import grab_keyboard_docs
-from .tabs import SpecialWindow, SpecialWindowInstance, Tab, TabDict, TabManager
+from .tabs import DropDirection, SpecialWindow, SpecialWindowInstance, Tab, TabDict, TabManager
 from .types import AsyncResponse, LayerShellConfig, SingleInstanceData, WindowSystemMouseEvent, ac
 from .typing_compat import PopenType, TypedDict
 from .utils import (
@@ -458,14 +458,17 @@ class Boss:
             DumpCommands(args) if args.dump_commands or args.dump_bytes else None,
             talk_fd,
             listen_fd,
-            self.listening_on.startswith('unix:'),
         )
         self.args: CLIOptions = args
         self.mouse_handler: Callable[[WindowSystemMouseEvent], None] | None = None
         set_boss(self)
         self.mappings: Mappings = Mappings(global_shortcuts, self.refresh_active_tab_bar)
         self.notification_manager: NotificationManager = NotificationManager(debug=self.args.debug_keyboard or self.args.debug_rendering)
-        self.atexit.unlink(store_effective_config())
+        effective_config_path, effective_config_error = store_effective_config()
+        if effective_config_path:
+            self.atexit.unlink(effective_config_path)
+        if effective_config_error:
+            self.misc_config_errors.append(effective_config_error)
 
     def startup_first_child(self, os_window_id: int | None, startup_sessions: Iterable[Session] = ()) -> None:
         si = startup_sessions or create_sessions(get_options(), self.args, default_session=get_options().startup_session)
@@ -2228,21 +2231,61 @@ class Boss:
         if tm is not None:
             tm.update_tab_bar_data()
 
+    def _reset_drop_previews(self) -> None:
+        "Clear all drag and drop UI state, once a drag has ended"
+        self._update_drag_over(None)
+        for q in self.all_tab_managers:
+            q.on_window_drop_move()
+            q.on_tab_drop_move()
+            q.layout_tab_bar()  # ensure tab bar is fully updated
+
+    def _update_drag_over(self, tm: TabManager | None) -> None:
+        "Record which OS Window a drag is currently over, so that its tab bar stays visible"
+        for q in self.all_tab_managers:
+            q.set_drag_over_me(q is tm)
+
+    def _sole_window_of_tab(self, tab: Tab) -> Window | None:
+        "The only window in tab, if tab has a single window group (overlays of that group are allowed)"
+        return tab.active_window if tab.windows.num_groups == 1 else None
+
+    def _tab_merge_target(self, tab: Tab, tm: TabManager, x: int, y: int) -> Window | None:
+        """The window of tab that is to be inserted into the layout of tm.active_tab, if tab is
+        dropped at x, y. None if the drop should be handled as an ordinary tab drop instead.
+
+        The caller must have already made the tab bar of tm visible (see TabManager.set_drag_over_me)
+        as otherwise the central region measured here is not the one the drop will use."""
+        dest_tab = tm.active_tab
+        if dest_tab is None or dest_tab is tab or (window := self._sole_window_of_tab(tab)) is None:
+            return None
+        central = viewport_for_window(tm.os_window_id)[0]
+        if not (central.left <= x < central.right and central.top <= y < central.bottom):
+            return None
+        return window
+
     def on_drop_move(self, os_window_id: int, x: int, y: int, from_self: bool, is_leave: bool) -> None:
         if (tm := self.os_window_map.get(os_window_id)) is None:
             return
         if from_self:
             tab_id, drag_started = get_tab_being_dragged()[:2]
             if tab_id and drag_started and (tab := self.tab_for_id(tab_id)):
-                central, tab_bar = viewport_for_window(os_window_id)[:2]
+                # Settle the tab bar visibility of the destination before measuring its
+                # regions. Doing it the other way around makes the central region shrink
+                # as a side effect of classifying the drop, which then re-classifies the
+                # same pointer position differently on the next drag move event.
+                self._update_drag_over(None if is_leave else tm)
+                tab_bar = viewport_for_window(os_window_id)[1]
                 in_tab_bar = tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom
                 detach = not in_tab_bar or tab.os_window_id != tm.os_window_id or is_leave
                 change_drag_thumbnail(tab.os_window_id, 1 if detach else 0)
+                merge_window = None if is_leave else self._tab_merge_target(tab, tm, x, y)
+                merge_window_id = merge_window.id if merge_window is not None else 0
                 for q in self.all_tab_managers:
-                    is_dest = q is tm and (in_tab_bar or os_window_id != tab.os_window_id) and not is_leave
+                    q.on_window_drop_move(merge_window_id, merge_window is not None and q is tm, x, y)
+                    is_dest = merge_window is None and q is tm and (in_tab_bar or os_window_id != tab.os_window_id) and not is_leave
                     q.on_tab_drop_move(tab_id, is_dest, x, y)
             window_id, drag_started = get_window_being_dragged()[:2]
             if window_id and drag_started:
+                self._update_drag_over(None if is_leave else tm)
                 for q in self.all_tab_managers:
                     q.on_window_drop_move(window_id, (not is_leave) and (q is tm), x, y)
 
@@ -2263,26 +2306,24 @@ class Boss:
             window_id = int(widb)
             tm.on_window_drop(x, y, window_id)
             set_window_being_dragged()
-            for q in self.all_tab_managers:
-                q.on_window_drop_move()
+            self._reset_drop_previews()
             return
         if (tidb := drop.get(f'application/net.kovidgoyal.kitty-tab-{os.getpid()}')) and (tab := self.tab_for_id(int(tidb))):
-            central, tab_bar = viewport_for_window(os_window_id)[:2]
+            tab_bar = viewport_for_window(os_window_id)[1]
             in_tab_bar = tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom
-            if in_tab_bar or tab.os_window_id != tm.os_window_id:
+            if (merge_window := self._tab_merge_target(tab, tm, x, y)) is not None:
+                tm.on_window_drop(x, y, merge_window.id)
+            elif in_tab_bar or tab.os_window_id != tm.os_window_id:
                 tm.on_tab_drop(x, y)
             else:
                 self._move_tab_to(tab)
             set_tab_being_dragged()
-            for tm in self.all_tab_managers:
-                tm.on_tab_drop_move()
-                tm.layout_tab_bar()  # ensure tab bar is fully updated
+            self._reset_drop_previews()
             return
         central, tab_bar = viewport_for_window(os_window_id)[:2]
         if central.left <= x < central.right and central.top <= y < central.bottom:
-            x -= central.left
-            y -= central.top
             if tab := tm.active_tab:
+                # Window geometry is already relative to the OS window.
                 for window in tab:
                     if window.is_visible_in_layout:
                         g = window.geometry
@@ -2322,6 +2363,7 @@ class Boss:
                             t.force_show_title_bars = False
                             t.relayout()
                 set_window_being_dragged()
+                self._update_drag_over(None)
                 for tm in self.all_tab_managers:
                     tm.on_window_drop_move()
                 if was_dropped and not was_canceled:
@@ -2334,15 +2376,35 @@ class Boss:
             return
         if (tab_id := int((data or {}).get(f'application/net.kovidgoyal.kitty-tab-{os.getpid()}', b'0').decode())) and get_tab_being_dragged()[0] == tab_id:
             tab = self.tab_for_id(tab_id)
-            if tab is not None and needs_toplevel_on_wayland:
+            # The native callback reports was_dropped=False for internal drops.
+            # Wayland can finish the source before delivering the destination's
+            # data, so complete its pending UI target unless the drag was canceled.
+            if not was_canceled and tab is not None and needs_toplevel_on_wayland:
                 for tm in self.all_tab_managers:
+                    target = tm.window_being_dropped
+                    if (
+                        target is not None
+                        and (window := self._sole_window_of_tab(tab)) is not None
+                        and (dest_window := self.window_id_map.get(target.window_id)) is not None
+                    ):
+                        # target.direction is resolved when the preview is drawn, as the quadrant
+                        # alone does not determine it (quadrant 6 highlights the whole window).
+                        if target.direction is None:
+                            self._move_window_to(window, target_tab_id=dest_window.tab_id)
+                        else:
+                            self._insert_window_in_direction(window, dest_window, target.direction)
+                        set_tab_being_dragged()
+                        self._reset_drop_previews()
+                        return
                     if tm.tab_being_dropped:
                         tm.on_tab_drop(0, 0, bypass_move=True)
                         return
             set_tab_being_dragged()
+            self._update_drag_over(None)
             for tm in self.all_tab_managers:
+                tm.on_window_drop_move()
                 tm.on_tab_drop_move()
-            if was_dropped and tab is not None:  # detach tab into new OS Window
+            if was_dropped and not was_canceled and tab is not None:  # detach tab into new OS Window
                 self._move_tab_to(tab)
 
     @ac(
@@ -3722,29 +3784,21 @@ class Boss:
             tab.current_layout.move_window_to_group(tab.windows, wg_b.id)
             tab.relayout()
 
-    def _insert_window_in_direction(
-        self,
-        window: Window,
-        dest_window: Window,
-        direction: Literal['left', 'right', 'top', 'bottom'],
-    ) -> None:
+    def _insert_window_in_direction(self, window: Window, dest_window: Window, direction: DropDirection) -> None:
         src_tab = window.tabref()
         dest_tab = dest_window.tabref()
         if src_tab is None or dest_tab is None:
             return
+        horizontal = direction in ('left', 'right')
+        after = direction in ('right', 'bottom')
         with self.suppress_focus_change_events():
-            if src_tab is not dest_tab:
-                target_tab_id = dest_tab.id
-                self._move_window_to(window, target_tab_id=target_tab_id)
-                dest_tab_fresh = self.tab_for_id(dest_tab.id)
-                if dest_tab_fresh is None:
-                    return
-                src_tab = dest_tab_fresh
-            layout = src_tab.current_layout
-            horizontal = direction in ('left', 'right')
-            after = direction in ('right', 'bottom')
-            layout.insert_window_next_to(src_tab.windows, window, dest_window, horizontal, after)
-            src_tab.relayout()
+            if src_tab is dest_tab:
+                src_tab.current_layout.insert_window_next_to(src_tab.windows, window, dest_window, horizontal, after)
+                src_tab.relayout()
+                return
+            dest_tab.attach_windows(src_tab.detach_window(window), next_to=dest_window, horizontal=horizontal, after=after)
+            self._cleanup_tab_after_window_removal(src_tab)
+            dest_tab.make_active()
 
     def _position_for_detached_window(self, source_os_window_id: int) -> tuple[int | None, int | None]:
         # fork: position a detached tab/window offset from its source window so
