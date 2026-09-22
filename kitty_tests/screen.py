@@ -2197,8 +2197,8 @@ class TestScreen(BaseTest):
         self.assertTrue(s.is_main_linebuf())
 
     def test_ime_preedit_styling(self):
-        # Pre-edit text is marked with a straight underline in the highlight
-        # color (and is not italic), rather than reverse video.
+        # Pre-edit text is not decorated at all (no italics, no underline) and is
+        # distinguished only by the pre-edit colors, rather than reverse video.
         s = self.create_screen(cols=10, lines=3)
         s.draw('xy')
         before = s.line(0).cursor_from(0)
@@ -2208,7 +2208,7 @@ class TestScreen(BaseTest):
             c = line.cursor_from(x)
             self.assertFalse(c.italic, f'pre-edit cell {x} is italic')
             self.assertFalse(c.reverse, f'pre-edit cell {x} is in reverse video')
-            self.ae(c.decoration, 1, f'pre-edit cell {x} is not straight-underlined')
+            self.ae(c.decoration, 0, f'pre-edit cell {x} is underlined')
             # decoration_fg is packed as (rgb << 8) | type, type 2 being RGB
             self.ae(c.decoration_fg & 0xFF, 2)
             self.ae(c.decoration_fg >> 8, 0xFFFACD)  # default selection_background
