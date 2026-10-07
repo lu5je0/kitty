@@ -460,6 +460,8 @@ for cursors that rapidly change their positions during UI updates in complex app
 See :opt:`cursor_trail_decay` to control the animation speed and :opt:`cursor_trail_start_threshold`
 to control when a cursor trail is started. You can also have different styles of trail by
 using the :opt:`custom_shaders` option, for example: :code:`custom_shaders cursor-trail-blaze`.
+To make fast cursor movements look smoother, use :code:`custom_shaders cursor-trail-motion-blur`,
+which blurs the trail slightly along the direction it is moving.
 """,
 )
 
@@ -937,7 +939,40 @@ opt(
 Detect URLs under the mouse. Detected URLs are highlighted with an underline and
 the mouse cursor becomes a hand over them. Even if this option is disabled, URLs
 are still clickable. See also the :opt:`underline_hyperlinks` option to control
-how hyperlinks (as opposed to plain text URLs) are displayed.
+how hyperlinks (as opposed to plain text URLs) are displayed. Use
+:opt:`detect_url_regex` to detect arbitrary text, such as file references, as URLs.
+""",
+)
+
+opt(
+    '+detect_url_regex',
+    '',
+    option_type='store_multiple',
+    add_to_default=False,
+    ctype='!detect_url_regex',
+    long_text="""
+A regular expression to detect as a URL under the mouse, in addition to the
+URLs detected via :opt:`url_prefixes`. Can be specified multiple times, text
+under the mouse is detected as a URL if any of the expressions match it. The
+expressions are tried in the order specified, and only if no normal URL is
+found under the mouse. Matches are highlighted and clickable exactly like
+normal detected URLs, see :opt:`detect_urls`. The expressions use the POSIX
+extended regular expression syntax, so use :code:`[0-9]` rather than
+:code:`\\\\d` and :code:`[[:alnum:]]` rather than :code:`\\\\w`. Text that has
+been soft wrapped onto multiple lines is matched as a single line, looking at
+most three lines above and below the mouse. For example, to detect file
+references of the form :file:`path/to/file.py:42`::
+
+    detect_url_regex [[:alnum:]_./-]+\\.[[:alnum:]]+:[0-9]+
+
+The matched text is used as the URL when clicked. Use :doc:`open_actions` with
+the :code:`url` criterion to specify what to do with it. Note that the
+:code:`url` criterion uses Python regular expression syntax. For example, to
+pass file references to a script of your own that opens them in an editor, add
+to :file:`open-actions.conf`::
+
+    url ^[\\w./-]+\\.\\w+:\\d+$
+    action launch --type=background open-file-ref ${URL}
 """,
 )
 
@@ -1447,7 +1482,10 @@ Delay before input from the program running in the terminal is processed (in
 milliseconds). Note that decreasing it will increase responsiveness, but also
 increase CPU usage and might cause flicker in full screen programs that redraw
 the entire screen on each loop, because kitty is so fast that partial screen
-updates will be drawn. This setting is ignored when the input buffer is almost full.
+updates will be drawn. This setting is ignored when the input buffer is almost
+full. It is also ignored when less than 1 KB of input is pending, such as when
+the program echoes typed characters, but at most once per delay period, so
+continuous streams of small writes are still coalesced.
 """,
 )
 

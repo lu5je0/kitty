@@ -24,6 +24,7 @@ from .fast_data_types import (
     GLFW_PRESS,
     GLFW_RELEASE,
     add_tab,
+    add_timer,
     attach_window,
     buffer_keys_in_window,
     current_focused_os_window_id,
@@ -40,6 +41,7 @@ from .fast_data_types import (
     monotonic,
     next_window_id,
     remove_tab,
+    remove_timer,
     remove_window,
     reorder_tabs,
     replace_c0_codes_except_nl_space_tab,
@@ -57,7 +59,7 @@ from .fast_data_types import (
 from .layout.base import DragOverlayMode, Layout
 from .layout.interface import all_layouts, create_layout_object_for, evict_cached_layouts
 from .progress import ProgressState
-from .tab_bar import TabBar, TabBarData, apply_title_template
+from .tab_bar import TabBar, TabBarData, WindowDropTarget, apply_title_template
 from .types import ac
 from .typing_compat import EdgeLiteral, SessionTab, SessionType, TypedDict
 from .utils import cmdline_for_hold, color_as_int, log_error, platform_window_id, resolved_shell, shlex_split, which
@@ -681,9 +683,8 @@ class Tab:  # {{{
             return None
         return 'Could not resize'
 
-    def drag_resize_window(self, object_id: int, increment: float, is_horizontal: bool) -> bool:
-        increment_as_percent = self.current_layout.bias_increment_for_cell(self.windows, is_horizontal) * increment
-        if resized := self.current_layout.drag_resize_window(self.windows, object_id, increment_as_percent, is_horizontal):
+    def drag_resize_window(self, object_id: int, increment: float, is_horizontal: bool) -> float:
+        if resized := self.current_layout.drag_resize_window(self.windows, object_id, increment, is_horizontal):
             self.relayout()
         return resized
 
@@ -1322,9 +1323,18 @@ class Tab:  # {{{
 
 
 class TabBeingDropped(NamedTuple):
-    data: TabBarData
+    tab_id: int
     tab_ids: Sequence[int] = ()
-    last_drop_move_coordinate: int = -1
+
+
+class DragHover(NamedTuple):
+    "A tab to be switched to once the pointer has rested on it for a while during a drag"
+
+    tab_id: int
+    source_id: int  # The id of the window or tab being dragged
+    source_is_window: bool
+    deadline: float
+    timer: int
 
 
 DropDirection = Literal['left', 'right', 'top', 'bottom']
@@ -1348,6 +1358,10 @@ class TabManager:  # {{{
     window_being_dropped: WindowBeingDropped | None = None
     window_drag_target_tab_id: int = 0
     window_drag_over_me: bool = False
+    drag_hover: DragHover | None = None
+    drag_hover_delay: float = 0.6
+    tab_drag_focus_before_hover: int = 0
+    tab_drag_history_before_hover: tuple[int, ...] = ()
 
     def __init__(self, os_window_id: int, args: CLIOptions, wm_class: str, wm_name: str, startup_session: SessionType | None = None):
         self.os_window_id = os_window_id
@@ -1849,30 +1863,13 @@ class TabManager:  # {{{
     @property
     def tab_bar_data(self) -> Sequence[TabBarData]:
         at = self.active_tab
-        tab_being_dragged_from_here = False
-        dragged_tab_id, drag_started = get_tab_being_dragged()[:2]
-        if drag_started:
-            tab_being_dragged_from_here = self.tab_for_id(dragged_tab_id) is not None
-        window_drag_active = get_window_being_dragged()[1]
-        if self.tab_being_dropped is None:
-            wdtt = self.window_drag_target_tab_id
-            if tab_being_dragged_from_here:
-                tabs = tuple(t.data_for_tab_bar(t is at or t.id == wdtt) for t in self.tabs_to_be_shown_in_tab_bar if t.id != dragged_tab_id)
-            else:
-                tabs = tuple(t.data_for_tab_bar(t is at or t.id == wdtt) for t in self.tabs_to_be_shown_in_tab_bar)
-            if window_drag_active or get_options().tab_bar_show_new_tab_button:
-                tabs = tabs + (TabBarData(title='+', is_active=self.window_drag_target_tab_id == -1, os_window_id=self.os_window_id),)
-            return tabs
-        tmap = {t.id: t for t in self.tabs}
-        at = self.active_tab
-        ans = []
-        for tid in self.tab_being_dropped.tab_ids:
-            if tid == dragged_tab_id:
-                ans.append(self.tab_being_dropped.data)
-            else:
-                tab = tmap[tid]
-                ans.append(tab.data_for_tab_bar(tab is at))
-        return ans
+        wdtt = self.window_drag_target_tab_id
+        # Drag previews only draw an insertion marker. Keeping the real tabs in
+        # place also keeps custom renderers' tab counts and hit testing stable.
+        tabs = tuple(t.data_for_tab_bar(t is at or t.id == wdtt) for t in self.tabs_to_be_shown_in_tab_bar)
+        if get_window_being_dragged()[1] or get_options().tab_bar_show_new_tab_button:
+            tabs += (TabBarData(title='+', is_active=wdtt == -1, os_window_id=self.os_window_id),)
+        return tabs
 
     def apply_tab_ordering(self, tab_ids: Sequence[int]) -> None:
         id_map = {t.id: t for t in self.tabs}
@@ -1885,78 +1882,59 @@ class TabManager:  # {{{
     @update_tab_bar_visibility
     def on_tab_drop_move(self, tab_id: int = 0, is_dest: bool = False, x: int = 0, y: int = 0) -> None:
         if not is_dest:
+            self._cancel_drag_hover()
             if self.tab_being_dropped:
                 self.tab_being_dropped = None
+                self.tab_bar.tab_drop_insert_before = None
                 self.layout_tab_bar()
             return
-        if self.tab_bar_should_be_visible:
-            all_tabs = [t.tab_id for t in self.tab_bar.last_laid_out_tabs if t.tab_id >= 0]
-        else:
-            all_tabs = [t.tab_id for t in self.tab_bar_data if t.tab_id >= 0]
-        force_update = False
-        if self.tab_being_dropped is None:
-            tab = get_boss().tab_for_id(tab_id)
-            if tab is None:
-                return
-            tab_data = tab.data_for_tab_bar(tab is get_boss().active_tab)
-            if tab_id not in all_tabs:
-                all_tabs.append(tab_id)
-            _, _, start_x, start_y = get_tab_being_dragged()
-            start_coordinate = self.tab_bar.drag_axis_coordinate(int(start_x), int(start_y))
-            self.tab_being_dropped = TabBeingDropped(data=tab_data, tab_ids=all_tabs, last_drop_move_coordinate=start_coordinate)
-            force_update = True
-        coordinate = self.tab_bar.drag_axis_coordinate(x, y)
-        if coordinate == self.tab_being_dropped.last_drop_move_coordinate and not force_update:
+        if (tab := get_boss().tab_for_id(tab_id)) is None:
+            self.on_tab_drop_move()
             return
-        mouse_moved_towards_start = coordinate < self.tab_being_dropped.last_drop_move_coordinate
-        old_tab_ids = self.tab_being_dropped.tab_ids
-        idx_under_mouse = -1
-        if tab_id_under_mouse := self.tab_bar.tab_id_at(x, y):
-            with suppress(Exception):
-                idx_under_mouse = old_tab_ids.index(tab_id_under_mouse)
-        if idx_under_mouse < 0:
-            if self.tab_bar.laid_out_once:
-                start = self.tab_bar.window_geometry.top if self.tab_bar.is_vertical else self.tab_bar.window_geometry.left
-                idx_under_mouse = 0 if coordinate < start else len(old_tab_ids) - 1
-            else:
-                # native titlebar tabs: the grid tab bar is never laid out
-                idx_under_mouse = len(old_tab_ids) - 1
-        old_idx_under_mouse = old_tab_ids.index(tab_id)
-        idx_moved_towards_start = old_idx_under_mouse > idx_under_mouse
-        new_tab_ids = old_tab_ids
-        if mouse_moved_towards_start == idx_moved_towards_start:
-            new_tab_ids = list(old_tab_ids)
-            new_tab_ids[idx_under_mouse], new_tab_ids[old_idx_under_mouse] = new_tab_ids[old_idx_under_mouse], new_tab_ids[idx_under_mouse]
-        self.tab_being_dropped = self.tab_being_dropped._replace(last_drop_move_coordinate=coordinate, tab_ids=new_tab_ids)
-        if force_update or self.tab_being_dropped.tab_ids != old_tab_ids:
-            self.layout_tab_bar()
+        # Dropping a tab on the tab bar always re-orders. Hovering a single window
+        # tab over another tab switches to it, so that the window can then be
+        # dropped into that tab's content area.
+        hover_tab_id = 0
+        if tab.windows.num_groups == 1 and (target := self.tab_bar.window_drop_target_at(x, y).tab_id) != tab_id:
+            hover_tab_id = target
+        self._update_drag_hover(hover_tab_id, tab_id, source_is_window=False)
+        all_tabs = [t.id for t in self.tabs_to_be_shown_in_tab_bar]
+        before = self.tab_bar.tab_insertion_target_at(x, y)
+        idx = all_tabs.index(before) if before in all_tabs else len(all_tabs)
+        # Insert at the indicated boundary, preserving the order of every other tab.
+        order = [tid for tid in all_tabs[:idx] if tid != tab_id] + [tab_id] + [tid for tid in all_tabs[idx:] if tid != tab_id]
+        self.tab_being_dropped = TabBeingDropped(tab_id=tab_id, tab_ids=order)
+        if self.tab_bar.tab_drop_insert_before != before:
+            self.tab_bar.tab_drop_insert_before = before
+            self.mark_tab_bar_dirty()
 
     @update_tab_bar_visibility
     def on_tab_drop(self, x: int, y: int, bypass_move: bool = False) -> None:
         if (td := self.tab_being_dropped) is None:
             return
-        if (tab := get_boss().tab_for_id(td.data.tab_id)) is None:
-            self.tab_being_dropped = None
+        if (tab := get_boss().tab_for_id(td.tab_id)) is None:
+            self.on_tab_drop_move()
             set_tab_being_dragged()
-            self.layout_tab_bar()
             return
         if not bypass_move:
-            self.on_tab_drop_move(td.data.tab_id, True, x, y)
+            self.on_tab_drop_move(td.tab_id, True, x, y)
         if (td := self.tab_being_dropped) is None:
             return
         self.tab_being_dropped = None
-        atid = self.active_tab.id if self.active_tab else 0
+        self.tab_bar.tab_drop_insert_before = None
+        self._cancel_drag_hover()
+        active_tab_id = self.active_tab.id if self.active_tab else 0
         set_tab_being_dragged()
         if tab.os_window_id != self.os_window_id:
-            if (t := get_boss()._move_tab_to(tab, self.os_window_id)) is not None:
-                n = list(td.tab_ids)
-                idx = n.index(td.data.tab_id)
-                n[idx] = t.id
-                td = td._replace(tab_ids=n)
-        self.apply_tab_ordering(td.tab_ids)
-        if atid and tab.os_window_id == self.os_window_id and (tab := self.tab_for_id(atid)):
-            idx = self.tabs.index(tab)
-            self._set_active_tab(idx, store_in_history=False)
+            if (t := get_boss()._move_tab_to(tab, self.os_window_id)) is None:
+                self.layout_tab_bar()
+                return
+            td = td._replace(tab_ids=[t.id if tid == td.tab_id else tid for tid in td.tab_ids])
+            active_tab_id = t.id
+        self.apply_tab_ordering([tid for tid in td.tab_ids if self.tab_for_id(tid) is not None])
+        # Re-ordering leaves active_tab_idx pointing at whichever tab now occupies the old index
+        if active_tab_id and (at := self.tab_for_id(active_tab_id)) is not None:
+            self._set_active_tab(self.tabs.index(at), store_in_history=False)
         self.layout_tab_bar()
 
     def swap_tabs(self, idx: int, nidx: int) -> None:
@@ -1999,7 +1977,7 @@ class TabManager:  # {{{
                 except OSError as e:
                     log_error(f'Failed to start tab drag: {e}')
                     set_tab_being_dragged()
-                    self.mark_tab_bar_dirty()  # re-render the tab bar in case it was drawn without the dragged tab
+                    self.mark_tab_bar_dirty()
                 break
         else:
             set_tab_being_dragged()
@@ -2123,11 +2101,81 @@ class TabManager:  # {{{
         self.window_drag_target_tab_id = tab_id
         self.mark_tab_bar_dirty()
 
+    def _cancel_drag_hover(self) -> None:
+        if (h := self.drag_hover) is not None:
+            self.drag_hover = None
+            if h.timer:
+                remove_timer(h.timer)
+
+    def finish_tab_drag_hover(self, restore_focus: bool = True) -> None:
+        """Discard a tab drag's hover selection, restoring the previous tab if needed."""
+        tab_id = self.tab_drag_focus_before_hover
+        history = self.tab_drag_history_before_hover
+        self.tab_drag_focus_before_hover = 0
+        self.tab_drag_history_before_hover = ()
+        if restore_focus and tab_id and (tab := self.tab_for_id(tab_id)) is not None:
+            if tab is not self.active_tab:
+                self.set_active_tab(tab)
+            self.active_tab_history.clear()
+            self.active_tab_history.extend(tid for tid in history if self.tab_for_id(tid) is not None)
+
+    def _activate_drag_hover(self, timer_id: int | None = None) -> None:
+        if (h := self.drag_hover) is None or (timer_id is not None and timer_id != h.timer):
+            return
+        self.drag_hover = None
+        if timer_id is None and h.timer:
+            remove_timer(h.timer)  # activated by a drag event before the timer fired
+        if not self.window_drag_over_me:
+            return
+        if h.source_is_window:
+            if get_window_being_dragged()[:2] != (h.source_id, True):
+                return
+        else:
+            # Only a single window tab can be dropped into the content area of another tab
+            if get_tab_being_dragged()[:2] != (h.source_id, True):
+                return
+            source = get_boss().tab_for_id(h.source_id)
+            if source is None or source.windows.num_groups != 1 or source.id == h.tab_id:
+                return
+        if (tab := self.tab_for_id(h.tab_id)) is not None:
+            if not h.source_is_window and not self.tab_drag_focus_before_hover and self.active_tab is not None:
+                self.tab_drag_focus_before_hover = self.active_tab.id
+                self.tab_drag_history_before_hover = tuple(self.active_tab_history)
+            self.set_active_tab(tab)
+
+    def _update_drag_hover(self, tab_id: int, source_id: int, source_is_window: bool) -> None:
+        "Switch to tab_id once the pointer rests on it for drag_hover_delay seconds, zero cancels"
+        tab = self.tab_for_id(tab_id) if tab_id else None
+        if tab is None or tab is self.active_tab:
+            self._cancel_drag_hover()
+        elif (h := self.drag_hover) is None or (h.tab_id, h.source_id, h.source_is_window) != (tab_id, source_id, source_is_window):
+            self._cancel_drag_hover()
+            delay = self.drag_hover_delay
+            timer = add_timer(self._activate_drag_hover, delay, False)
+            self.drag_hover = DragHover(tab_id, source_id, source_is_window, monotonic() + delay, timer)
+        elif monotonic() >= h.deadline:
+            # Cocoa sends periodic drag updates even while stationary, including in
+            # tracking run loop modes where ordinary timers do not fire.
+            self._activate_drag_hover()
+
+    def _set_window_drop_tab_target(self, target: WindowDropTarget | None = None, window_id: int = 0) -> None:
+        before = target.before_tab_id if target is not None else None
+        if self.tab_bar.window_drop_insert_before != before:
+            self.tab_bar.window_drop_insert_before = before
+            self.mark_tab_bar_dirty()
+        tab_id = target.tab_id if target is not None else 0
+        # Highlight the "+" button only when appending, elsewhere the insertion marker is enough
+        self._set_drag_target_tab(-1 if before == 0 else tab_id)
+        # Tab drags clear the window preview before updating the tab preview on
+        # every drag event. Keep an existing tab hover timer across those events.
+        if tab_id or self.drag_hover is None or self.drag_hover.source_is_window:
+            self._update_drag_hover(tab_id, window_id, source_is_window=True)
+
     def _clear_force_show_title_bars(self) -> None:
         boss = get_boss()
         for tm in boss.all_tab_managers:
             tm._set_drag_target_window(0)
-            tm._set_drag_target_tab(0)
+            tm._set_window_drop_tab_target()
             for tab in tm:
                 if tab.force_show_title_bars:
                     tab.force_show_title_bars = False
@@ -2219,16 +2267,16 @@ class TabManager:  # {{{
         visibility is owned by set_drag_over_me(), which the caller must have already updated."""
         if not is_dest:
             self._set_drag_target_window(0)
-            self._set_drag_target_tab(0)
+            self._set_window_drop_tab_target()
             return
         from .fast_data_types import viewport_for_window
 
         tab_bar = viewport_for_window(self.os_window_id)[1]
         if tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom:
             self._set_drag_target_window(0)
-            self._set_drag_target_tab(self.tab_bar.tab_id_at(x, y))
+            self._set_window_drop_tab_target(self.tab_bar.window_drop_target_at(x, y), window_id)
             return
-        self._set_drag_target_tab(0)
+        self._set_window_drop_tab_target()
         dest_window = self._find_window_at(x, y)
         active_tab = self.active_tab
         if dest_window is None or dest_window.id == window_id or active_tab is None:
@@ -2244,6 +2292,29 @@ class TabManager:  # {{{
         quadrant = 6 if active_tab.current_layout.drag_overlay_mode is DragOverlayMode.full else quadrant_for_direction[direction]
         self._set_drag_target_window(dest_window.id, quadrant, direction)
 
+    def _insert_window_as_tab(self, window: Window, before_tab_id: int) -> None:
+        "Put window into a tab of its own, placed before the tab before_tab_id, or last if zero"
+        boss = get_boss()
+        if (src_tab := window.tabref()) is None:
+            return
+        if boss._sole_window_of_tab(src_tab) is window:
+            # The window already has a tab of its own, move that tab instead,
+            # preserving its title and layout
+            if src_tab.os_window_id == self.os_window_id:
+                tab: Tab | None = src_tab
+            else:
+                tab = boss._move_tab_to(src_tab, self.os_window_id)
+        else:
+            boss._move_window_to(window, target_tab_id='new', target_os_window_id=self.os_window_id)
+            tab = window.tabref()
+        if tab is None or tab.os_window_id != self.os_window_id:
+            return
+        order = [t.id for t in self.tabs if t is not tab]
+        idx = order.index(before_tab_id) if before_tab_id in order else len(order)
+        order.insert(idx, tab.id)
+        self.apply_tab_ordering(order)
+        self.set_active_tab(tab)
+
     def on_window_drop(self, x: int, y: int, window_id: int) -> None:
         from .fast_data_types import viewport_for_window
 
@@ -2254,21 +2325,21 @@ class TabManager:  # {{{
         # run before the on_drop data transfer completes, clearing window_drag_over_me
         # and hiding the tab bar for the single-tab case before we get here.
         self.set_drag_over_me(True)
+        central, tab_bar = viewport_for_window(self.os_window_id)[:2]
+        in_tab_bar = tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom
+        tab_target = self.tab_bar.window_drop_target_at(x, y) if in_tab_bar else None
         self._clear_force_show_title_bars()
         w = boss.window_id_map.get(window_id)
         if w is None:
             return
         set_window_being_dragged()
         self.mark_tab_bar_dirty()
-        central, tab_bar = viewport_for_window(self.os_window_id)[:2]
-
         # Case 1: Drop on tab bar → move to that tab
-        in_tab_bar = tab_bar.left <= x < tab_bar.right and tab_bar.top <= y < tab_bar.bottom
-        if in_tab_bar:
-            if (tab_id := self.tab_bar.tab_id_at(x, y)) and (dest_tab := self.tab_for_id(tab_id)):
+        if tab_target is not None:
+            if tab_target.before_tab_id is not None:
+                self._insert_window_as_tab(w, tab_target.before_tab_id)
+            elif (dest_tab := self.tab_for_id(tab_target.tab_id)) is not None:
                 boss._move_window_to(w, target_tab_id=dest_tab.id)
-            else:
-                boss._move_window_to(w, target_tab_id='new')
             return
 
         # Case 2: Drop in central area
@@ -2313,6 +2384,7 @@ class TabManager:  # {{{
         return self.tab_bar.blank_rects if self.tab_bar_should_be_visible else ()
 
     def destroy(self) -> None:
+        self._cancel_drag_hover()
         for t in self:
             t.destroy()
         self.tab_bar.destroy()

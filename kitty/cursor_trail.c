@@ -160,6 +160,9 @@ update_cursor_trail_needs_render(CursorTrail *ct, Window *w, ndc_coords g) {
 
 bool
 update_cursor_trail(CursorTrail *ct, Window *w, monotonic_t now, OSWindow *os_window) {
+    // remember where the trail was drawn in the previous frame, for shaders that do motion blur
+    memcpy(ct->previous_corner_x, ct->corner_x, sizeof(ct->previous_corner_x));
+    memcpy(ct->previous_corner_y, ct->corner_y, sizeof(ct->previous_corner_y));
     ct->target_updated = false;
     ndc_coords g = {
         .xstart = gl_pos_x(w->render_data.geometry.left, os_window->viewport_width),

@@ -105,6 +105,17 @@ color_vec4(GLint location, color_type color, GLfloat alpha) {
     glUniform4f(location, srgb_lut[(color >> 16) & 0xFF], srgb_lut[(color >> 8) & 0xFF], srgb_lut[color & 0xFF], alpha);
 }
 
+// Write a color into a std140 float4 whose fourth component is unused. Uses
+// the same table as the shaders so the result is identical to converting the
+// color in the shader.
+static void
+linear_color_vec4(GLfloat *dest, color_type color) {
+    dest[0] = srgb_lut[(color >> 16) & 0xFF];
+    dest[1] = srgb_lut[(color >> 8) & 0xFF];
+    dest[2] = srgb_lut[color & 0xFF];
+    dest[3] = 0.f;
+}
+
 
 static void
 clear_current_framebuffer(void) {
@@ -377,14 +388,8 @@ draw_rounded_rect(
 
 // Cell {{{
 
-enum {
-    CELL_RENDER_DATA_BINDING_POINT = 0,
-    COLOR_TABLE_BINDING_POINT = 1,
-    GAMMA_LUT_BINDING_POINT = 2,
-    BORDER_COLORS_BINDING_POINT = 3,
-    CUSTOM_END_DATA_BINDING_POINT = 4
-};
-enum { GAMMA_LUT_GLOBAL_BUFFER, BORDER_COLORS_GLOBAL_BUFFER };
+enum { CELL_RENDER_DATA_BINDING_POINT = 0, COLOR_TABLE_BINDING_POINT = 1, BORDER_COLORS_BINDING_POINT = 2, CUSTOM_END_DATA_BINDING_POINT = 3 };
+enum { BORDER_COLORS_GLOBAL_BUFFER };
 // VAOs used only to hold buffers for UBOs that are shared amongst programs/windows,
 // their vertex attribute/array facilities are unused.
 static ssize_t shader_globals_vao_idx = -1;
@@ -424,30 +429,44 @@ static struct {
 } custom_shaders;
 
 static void
-write_float_array_to_ubo(void *dest, const GLfloat *src, size_t count, const ArrayInformation *ai) {
-    GLint stride = MAX((GLint)sizeof(GLfloat), ai->stride);
-    uint8_t *buf = (uint8_t *)dest + ai->offset;
-    for (size_t i = 0; i < count; i++, buf += stride) memcpy(buf, src + i, sizeof(GLfloat));
-}
-
-static void
 write_uint_array_to_ubo(void *dest, const GLuint *src, size_t count, const ArrayInformation *ai) {
     GLint stride = MAX((GLint)sizeof(GLuint), ai->stride);
     uint8_t *buf = (uint8_t *)dest + ai->offset;
     for (size_t i = 0; i < count; i++, buf += stride) memcpy(buf, src + i, sizeof(GLuint));
 }
 
+// The gamma LUT is a compile time constant that lives in the default uniform
+// block of every program that needs it, rather than in a UBO shared between
+// them. Uniform values are part of program object state, which the GL
+// implementation must maintain, while the data store of a buffer object is
+// ours and some drivers silently discard it, notably macOS waking from sleep
+// or reconfiguring its displays. Every color in every affected program then
+// resolves to garbage with nothing to ever restore it. Uploading it costs a
+// single GL call per program, so this can simply be called again whenever we
+// have reason to believe GPU state was lost.
+// See https://github.com/kovidgoyal/kitty/issues/10571
+void
+upload_gamma_lut(void) {
+#define U(program)                                                    \
+    {                                                                 \
+        bind_program(program);                                        \
+        GLint loc = program_uniform_location(program, "gamma_lut");   \
+        if (loc >= 0) glUniform1fv(loc, arraysz(srgb_lut), srgb_lut); \
+    }
+    for (int i = CELL_PROGRAM; i < CELL_PROGRAM_SENTINEL; i++) U(i);
+    U(BORDERS_PROGRAM);
+    U(PADDING_PROGRAM);
+#undef U
+    unbind_program();
+}
+
 static void
 init_cell_program(void) {
-    GLint gamma_lut_buf_size = 0;
     for (int i = CELL_PROGRAM; i < CELL_PROGRAM_SENTINEL; i++) {
         UniformBlock crd = program_uniform_block(i, "CellRenderData");
         glUniformBlockBinding(program_id(i), crd.index, CELL_RENDER_DATA_BINDING_POINT);
         UniformBlock ct = program_uniform_block(i, "ColorTable");
         glUniformBlockBinding(program_id(i), ct.index, COLOR_TABLE_BINDING_POINT);
-        UniformBlock glut = program_uniform_block(i, "GammaLUT");
-        glUniformBlockBinding(program_id(i), glut.index, GAMMA_LUT_BINDING_POINT);
-        gamma_lut_buf_size = MAX(gamma_lut_buf_size, glut.size);
     }
 
     // Sanity check to ensure the attribute location binding worked
@@ -465,8 +484,6 @@ init_cell_program(void) {
 #undef C
     UniformBlock border_colors = program_uniform_block(BORDERS_PROGRAM, "Colors");
     glUniformBlockBinding(program_id(BORDERS_PROGRAM), border_colors.index, BORDER_COLORS_BINDING_POINT);
-    UniformBlock border_glut = program_uniform_block(BORDERS_PROGRAM, "GammaLUT");
-    glUniformBlockBinding(program_id(BORDERS_PROGRAM), border_glut.index, GAMMA_LUT_BINDING_POINT);
 
     // The padding program shares the cell background computation and so uses the
     // same uniform blocks bound to the same binding points as the cell programs.
@@ -475,8 +492,6 @@ init_cell_program(void) {
         glUniformBlockBinding(program_id(PADDING_PROGRAM), crd.index, CELL_RENDER_DATA_BINDING_POINT);
         UniformBlock ct = program_uniform_block(PADDING_PROGRAM, "ColorTable");
         glUniformBlockBinding(program_id(PADDING_PROGRAM), ct.index, COLOR_TABLE_BINDING_POINT);
-        UniformBlock glut = program_uniform_block(PADDING_PROGRAM, "GammaLUT");
-        glUniformBlockBinding(program_id(PADDING_PROGRAM), glut.index, GAMMA_LUT_BINDING_POINT);
     }
 #define C(name, expected)                                                                                                                     \
     {                                                                                                                                         \
@@ -488,19 +503,13 @@ init_cell_program(void) {
     C(is_selected, 2);
 #undef C
 
-    // The gamma LUT is a constant, shared amongst all the programs that use it via a single UBO.
     if (shader_globals_vao_idx == -1) {
         shader_globals_vao_idx = create_vao();
         add_buffer_to_vao(shader_globals_vao_idx, GL_UNIFORM_BUFFER);
-        add_buffer_to_vao(shader_globals_vao_idx, GL_UNIFORM_BUFFER);
-        gamma_lut_buf_size = MAX(gamma_lut_buf_size, border_glut.size);
-        void *gamma_lut_buf = alloc_and_map_vao_buffer(shader_globals_vao_idx, gamma_lut_buf_size, GAMMA_LUT_GLOBAL_BUFFER, false);
-        const ArrayInformation a = program_uniform_array(CELL_PROGRAM, "gamma_lut");
-        write_float_array_to_ubo(gamma_lut_buf, srgb_lut, arraysz(srgb_lut), &a);
-        unmap_vao_buffer(shader_globals_vao_idx, GAMMA_LUT_GLOBAL_BUFFER);
         // The border colors change on every draw, but are shared amongst all border VAOs (only one is ever drawn at a time)
         alloc_vao_buffer(shader_globals_vao_idx, border_colors.size, BORDER_COLORS_GLOBAL_BUFFER, GL_STREAM_DRAW);
     }
+    upload_gamma_lut();
     bind_shader_globals_to_current_context();
 }
 
@@ -541,7 +550,17 @@ init_custom_programs(void) {
                 set_optional_sampler("b", CUSTOM_END_TEXTURE_B_UNIT);
                 set_optional_sampler("persist", CUSTOM_END_TEXTURE_PERSIST_UNIT);
 #undef set_optional_sampler
-                glUniform1i(program_uniform_location(i, "group"), 0);
+                GLint group_loc = try_program_uniform_location(i, "group");
+                if (group_loc >= 0) glUniform1i(group_loc, 0);
+                else if (custom_shaders.end.num_groups > 1) {
+                    // Every group is dispatched by setting this uniform, so without it
+                    // all of them render as group zero, which for a multi pass pipeline
+                    // means the intermediate passes are drawn to the screen.
+                    log_error(
+                        "The custom shader pipeline has %zu groups but its group uniform was optimized away by the"
+                        " GPU driver. Every group will render as group zero.",
+                        custom_shaders.end.num_groups);
+                }
                 UniformBlock ubd = program_uniform_block(i, "KittyCustomShaderData");
                 glUniformBlockBinding(program_id(i), ubd.index, CUSTOM_END_DATA_BINDING_POINT);
                 if (custom_end_vao_idx == -1) {
@@ -747,7 +766,6 @@ custom_shader_needs_render(const ShaderAnimState *before, const ShaderAnimState 
 void
 bind_shader_globals_to_current_context(void) {
     if (shader_globals_vao_idx == -1) return;
-    bind_vao_uniform_buffer(shader_globals_vao_idx, GAMMA_LUT_GLOBAL_BUFFER, GAMMA_LUT_BINDING_POINT);
     bind_vao_uniform_buffer(shader_globals_vao_idx, BORDER_COLORS_GLOBAL_BUFFER, BORDER_COLORS_BINDING_POINT);
 }
 
@@ -809,6 +827,16 @@ has_bgimage(OSWindow *w) {
     return background_image_for_os_window(w) != NULL;
 }
 
+// The value resolve_dynamic_color() in background.slang needs for the color
+// types that are an actual color. The other two types resolve to colors that
+// are only known per-cell, so the shader ignores this value for them.
+static color_type
+dynamic_color_for_gpu(const ColorProfile *cp, color_type val) {
+    const DynamicColor dc = {.val = val}, zero = {0};
+    if (dc.type != COLOR_IS_RGB && dc.type != COLOR_IS_INDEX) return 0;
+    return colorprofile_to_color(cp, dc, zero).rgb;
+}
+
 static color_type
 cell_update_uniform_block(
     ssize_t vao_idx,
@@ -820,9 +848,17 @@ cell_update_uniform_block(
     float inactive_text_alpha,
     float bg_alpha) {
     struct GPUCellRenderData {
+        // Colors that are constant for the whole draw, pre-converted to linear
+        // space so the vertex shader does not do a gamma LUT lookup for them
+        // once per vertex. These must come first and the fourth component of
+        // each is unused padding, see CellRenderData in background.slang.
+        GLfloat default_fg_lin[4], default_bg_lin[4], highlight_fg_lin[4], highlight_bg_lin[4];
+        GLfloat main_cursor_fg_lin[4], main_cursor_bg_lin[4], url_color_lin[4];
+        GLfloat extra_cursor_fg_lin[4], extra_cursor_bg_lin[4];
+
         GLfloat use_cell_bg_for_selection_fg, use_cell_fg_for_selection_color, use_cell_for_selection_bg;
 
-        GLuint default_fg, highlight_fg, highlight_bg, main_cursor_fg, main_cursor_bg, url_color, url_style, inverted, extra_cursor_fg, extra_cursor_bg;
+        GLuint default_fg, url_style, inverted, extra_cursor_fg, extra_cursor_bg;
 
         GLuint columns, lines, sprites_xnum, sprites_ynum, cursor_shape, cell_width, cell_height;
         GLuint cursor_x1, cursor_x2, cursor_y1, cursor_y2;
@@ -840,12 +876,24 @@ cell_update_uniform_block(
         copy_color_table_to_buffer(cp, ct_buf, 0, ai.stride / sizeof(GLuint));
         unmap_vao_buffer(vao_idx, color_table_buf);
     }
-    struct GPUCellRenderData *rd =
-        (struct GPUCellRenderData *)map_vao_buffer_for_write_only(vao_idx, uniform_buffer, 0, program_uniform_block(CELL_PROGRAM, "CellRenderData").size);
+    // This struct is a hand written mirror of the std140 layout of
+    // CellRenderData in background.slang, a mismatch silently corrupts every
+    // color, so check it once.
+    const UniformBlock crd_block = program_uniform_block(CELL_PROGRAM, "CellRenderData");
+    static bool crd_block_size_checked = false;
+    if (!crd_block_size_checked) {
+        crd_block_size_checked = true;
+        if ((size_t)crd_block.size < sizeof(struct GPUCellRenderData))
+            fatal("The CellRenderData uniform block is %d bytes but the C struct mirroring it is %zu bytes", crd_block.size, sizeof(struct GPUCellRenderData));
+    }
+    struct GPUCellRenderData *rd = (struct GPUCellRenderData *)map_vao_buffer_for_write_only(vao_idx, uniform_buffer, 0, crd_block.size);
 #define COLOR(name) colorprofile_to_color(cp, cp->overridden.name, cp->configured.name).rgb
+    // The shaders need these only in linear space, they are converted and
+    // written into rd just before the buffer is unmapped. The cursor colors
+    // are left as is when there is no cursor to render.
+    const color_type highlight_fg = COLOR(highlight_fg), highlight_bg = COLOR(highlight_bg);
+    color_type main_cursor_fg = 0, main_cursor_bg = 0;
     rd->default_fg = COLOR(default_fg);
-    rd->highlight_fg = COLOR(highlight_fg);
-    rd->highlight_bg = COLOR(highlight_bg);
     rd->extra_cursor_fg = screen->extra_cursors.color.text.val;
     rd->extra_cursor_bg = screen->extra_cursors.color.cursor.val;
     rd->bg_colors0 = COLOR(default_bg);
@@ -928,25 +976,25 @@ cell_update_uniform_block(
         }
         // If you change the following algorithm remember to change it in the cell shader for extra cursors too
         if (IS_SPECIAL_COLOR(cursor_color)) {
-            if (line_for_cursor) pick_cursor_color(cell_fg, cell_bg, &rd->main_cursor_fg, &rd->main_cursor_bg, rd->default_fg, rd->bg_colors0);
+            if (line_for_cursor) pick_cursor_color(cell_fg, cell_bg, &main_cursor_fg, &main_cursor_bg, rd->default_fg, rd->bg_colors0);
             else {
-                rd->main_cursor_fg = rd->bg_colors0;
-                rd->main_cursor_bg = rd->default_fg;
+                main_cursor_fg = rd->bg_colors0;
+                main_cursor_bg = rd->default_fg;
             }
             if (cell_bg == cell_fg) {
-                rd->main_cursor_fg = rd->bg_colors0;
-                rd->main_cursor_bg = rd->default_fg;
+                main_cursor_fg = rd->bg_colors0;
+                main_cursor_bg = rd->default_fg;
             } else {
-                rd->main_cursor_fg = cell_bg;
-                rd->main_cursor_bg = cell_fg;
+                main_cursor_fg = cell_bg;
+                main_cursor_bg = cell_fg;
             }
         } else {
-            rd->main_cursor_bg = COLOR(cursor_color);
-            if (IS_SPECIAL_COLOR(cursor_text_color)) rd->main_cursor_fg = cell_bg;
-            else rd->main_cursor_fg = COLOR(cursor_text_color);
+            main_cursor_bg = COLOR(cursor_color);
+            if (IS_SPECIAL_COLOR(cursor_text_color)) main_cursor_fg = cell_bg;
+            else main_cursor_fg = COLOR(cursor_text_color);
         }
         // store last rendered cursor color for trail rendering
-        screen->last_rendered.cursor_bg = rd->main_cursor_bg;
+        screen->last_rendered.cursor_bg = main_cursor_bg;
         if (!cursor->is_visible) {
             // Move the main cursor off screen so that only it is hidden, the
             // extra cursors keep their shape and colors.
@@ -977,8 +1025,16 @@ cell_update_uniform_block(
     rd->dim_opacity = OPT(dim_opacity);
 
 #undef COLOR
-    rd->url_color = OPT(url_color);
     rd->url_style = OPT(url_style);
+    linear_color_vec4(rd->default_fg_lin, rd->default_fg);
+    linear_color_vec4(rd->default_bg_lin, rd->bg_colors0);
+    linear_color_vec4(rd->highlight_fg_lin, highlight_fg);
+    linear_color_vec4(rd->highlight_bg_lin, highlight_bg);
+    linear_color_vec4(rd->main_cursor_fg_lin, main_cursor_fg);
+    linear_color_vec4(rd->main_cursor_bg_lin, main_cursor_bg);
+    linear_color_vec4(rd->url_color_lin, OPT(url_color));
+    linear_color_vec4(rd->extra_cursor_fg_lin, dynamic_color_for_gpu(cp, rd->extra_cursor_fg));
+    linear_color_vec4(rd->extra_cursor_bg_lin, dynamic_color_for_gpu(cp, rd->extra_cursor_bg));
     color_type default_bg = rd->bg_colors0;
     unmap_vao_buffer(vao_idx, uniform_buffer);
     rd = NULL;
@@ -1146,13 +1202,21 @@ set_cell_uniforms(bool force) {
             bind_program(i);
             glUniform1i(program_uniform_location(i, "image"), GRAPHICS_UNIT);
         }
+        // These are set for every cell program, but the background program draws no
+        // text and so does not have them.
+#define set_optional(setter, name, value)                  \
+    {                                                      \
+        GLint loc = try_program_uniform_location(i, name); \
+        if (loc >= 0) setter(loc, value);                  \
+    }
         for (int i = CELL_PROGRAM; i < CELL_PROGRAM_SENTINEL; i++) {
             bind_program(i);
-            glUniform1i(program_uniform_location(i, "sprites"), SPRITE_MAP_UNIT);
-            glUniform1i(program_uniform_location(i, "sprite_decorations_map"), SPRITE_DECORATIONS_MAP_UNIT);
-            glUniform1f(program_uniform_location(i, "text_contrast"), text_contrast);
-            glUniform1f(program_uniform_location(i, "text_gamma_adjustment"), text_gamma_adjustment);
+            set_optional(glUniform1i, "sprites", SPRITE_MAP_UNIT);
+            set_optional(glUniform1i, "sprite_decorations_map", SPRITE_DECORATIONS_MAP_UNIT);
+            set_optional(glUniform1f, "text_contrast", text_contrast);
+            set_optional(glUniform1f, "text_gamma_adjustment", text_gamma_adjustment);
         }
+#undef set_optional
         bind_program(BLIT_PROGRAM);
         glUniform1i(program_uniform_location(BLIT_PROGRAM, "image"), GRAPHICS_UNIT);
         bind_program(SCREENSHOT_PROGRAM);
@@ -2583,6 +2647,8 @@ run_custom_end_shader(OSWindow *os_window, float sx, float sy, monotonic_t now) 
         float central_area[4];
         float cursor_trail_corners_x[4];
         float cursor_trail_corners_y[4];
+        float cursor_trail_prev_corners_x[4];
+        float cursor_trail_prev_corners_y[4];
         float cursor_trail_edge[4];
         float cursor_trail_prev_edge[4];
         float cursor_color[4];
@@ -2623,10 +2689,23 @@ run_custom_end_shader(OSWindow *os_window, float sx, float sy, monotonic_t now) 
             active_win_geom = w->render_data.geometry;
             if (os_window->viewport_width && os_window->viewport_height) {
                 const float width = (float)os_window->viewport_width, height = (float)os_window->viewport_height;
-                d->active_window_padding[0] = (float)(w->padding.left + w->size_mismatch_padding.left) / width;
-                d->active_window_padding[1] = (float)(w->padding.bottom + w->size_mismatch_padding.bottom) / height;
-                d->active_window_padding[2] = (float)(w->padding.right + w->size_mismatch_padding.right) / width;
-                d->active_window_padding[3] = (float)(w->padding.top + w->size_mismatch_padding.top) / height;
+                // spaces is all the space the layout reserved around the window:
+                // margin, border (only if the layout reserves it), padding and
+                // cell-size compensation.
+                const WindowGeometry *sg = &w->render_data.geometry;
+                d->active_window_padding[0] = (float)sg->spaces.left / width;
+                d->active_window_padding[1] = (float)sg->spaces.bottom / height;
+                d->active_window_padding[2] = (float)sg->spaces.right / width;
+                d->active_window_padding[3] = (float)sg->spaces.top / height;
+                // The content geometry excludes the title bar. Include it before
+                // extending to the outer padding, so the effect boundary cannot
+                // cut through a title bar at either edge of the window.
+                const WindowRenderData *trd = &w->window_title_render_data;
+                if (trd->screen && trd->geometry.right > trd->geometry.left && trd->geometry.bottom > trd->geometry.top) {
+                    if (trd->geometry.top < active_win_geom.top) d->active_window_padding[3] += (float)(active_win_geom.top - trd->geometry.top) / height;
+                    if (trd->geometry.bottom > active_win_geom.bottom)
+                        d->active_window_padding[1] += (float)(trd->geometry.bottom - active_win_geom.bottom) / height;
+                }
             }
             Screen *s = w->render_data.screen;
             if (s) {
@@ -2649,6 +2728,8 @@ run_custom_end_shader(OSWindow *os_window, float sx, float sy, monotonic_t now) 
             for (int i = 0; i < 4; i++) {
                 d->cursor_trail_corners_x[i] = NDC_TO_UV(ct->corner_x[i]);
                 d->cursor_trail_corners_y[i] = NDC_TO_UV(ct->corner_y[i]);
+                d->cursor_trail_prev_corners_x[i] = NDC_TO_UV(ct->previous_corner_x[i]);
+                d->cursor_trail_prev_corners_y[i] = NDC_TO_UV(ct->previous_corner_y[i]);
             }
             d->cursor_trail_edge[0] = NDC_TO_UV(ct->cursor_edge_x[0]); // left
             d->cursor_trail_edge[1] = NDC_TO_UV(ct->cursor_edge_x[1]); // right
@@ -2738,10 +2819,12 @@ run_custom_end_shader(OSWindow *os_window, float sx, float sy, monotonic_t now) 
     unmap_vao_buffer(custom_end_vao_idx, 0);
     bind_vao_uniform_buffer(custom_end_vao_idx, 0, CUSTOM_END_DATA_BINDING_POINT);
 
-    GLint group_loc = program_uniform_location(CUSTOM_END_PROGRAM, "group");
-    GLint viewport_loc = program_uniform_location(CUSTOM_END_PROGRAM, "viewport");
-    GLint anim_progress_loc = program_uniform_location(CUSTOM_END_PROGRAM, "animation_progress");
-    GLint convert_to_srgb_loc = program_uniform_location(CUSTOM_END_PROGRAM, "convert_to_srgb");
+    // A custom shader need not reference any of these, in which case the driver
+    // drops them and glUniform*() on the resulting -1 location is a no-op.
+    GLint group_loc = try_program_uniform_location(CUSTOM_END_PROGRAM, "group");
+    GLint viewport_loc = try_program_uniform_location(CUSTOM_END_PROGRAM, "viewport");
+    GLint anim_progress_loc = try_program_uniform_location(CUSTOM_END_PROGRAM, "animation_progress");
+    GLint convert_to_srgb_loc = try_program_uniform_location(CUSTOM_END_PROGRAM, "convert_to_srgb");
     const unsigned num_groups = (unsigned)custom_shaders.end.num_groups;
     const unsigned textures_mask = custom_shaders.end.textures;
     const int vw = os_window->viewport_width, vh = os_window->viewport_height;

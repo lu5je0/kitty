@@ -14,6 +14,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #include <hb.h>
+#include <regex.h>
 #pragma GCC diagnostic pop
 
 #define OPT(name) global_state.opts.name
@@ -145,6 +146,10 @@ typedef struct Options {
     } url_prefixes;
     char_type *url_excluded_characters;
     bool detect_urls;
+    struct {
+        regex_t *items;
+        size_t count;
+    } detect_url_regex;
     bool tab_bar_hidden;
     double font_size;
     struct {
@@ -435,6 +440,8 @@ typedef struct CursorTrail {
     float opacity;
     float corner_x[4];
     float corner_y[4];
+    float previous_corner_x[4]; // corner_x as of the previous frame
+    float previous_corner_y[4]; // corner_y as of the previous frame
     float cursor_edge_x[2];
     float cursor_edge_y[2];
     float prev_cursor_edge_x[2]; // cursor_edge_x before the most recent cursor move
@@ -724,6 +731,7 @@ void draw_rounded_borders(BorderRects *, color_type, unsigned int, bool, OSWindo
 ssize_t create_cell_vao(void);
 ssize_t create_border_vao(void);
 void bind_shader_globals_to_current_context(void);
+void upload_gamma_lut(void);
 bool send_cell_data_to_gpu(ssize_t, Screen *, OSWindow *);
 void draw_cells(const WindowRenderData *, OSWindow *, bool, bool, bool, Window *, monotonic_t);
 bool update_cursor_trail(CursorTrail *ct, Window *w, monotonic_t now, OSWindow *os_window);

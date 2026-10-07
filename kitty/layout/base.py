@@ -324,7 +324,16 @@ class Layout:
             return False
         return self.apply_bias(idx, increment, all_windows, is_horizontal)
 
-    drag_resize_window = modify_size_of_window
+    def drag_resize_window(self, all_windows: WindowList, window_id: int, increment: float, is_horizontal: bool = True) -> float:
+        """Resize by a number of cells, returning the number of cells actually applied.
+
+        Layouts that can apply an increment only partially should override this and
+        report what they really did, so that the caller can keep the dragged divider
+        locked to the pointer. This generic implementation has no way to tell how much
+        apply_bias() clamped, so it reports all or nothing.
+        """
+        increment_as_percent = self.bias_increment_for_cell(all_windows, is_horizontal) * increment
+        return increment if self.modify_size_of_window(all_windows, window_id, increment_as_percent, is_horizontal) else 0.0
 
     def parse_layout_opts(self, layout_opts: str | None = None) -> LayoutOpts:
         data: dict[str, str] = {}

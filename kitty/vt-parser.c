@@ -21,6 +21,9 @@
 #define BUF_EXTRA (512u / 8u)
 #define MAX_ESCAPE_CODE_LENGTH (BUF_SZ / 4u)
 #define MAX_CSI_PARAMS 256u
+// Pending input smaller than this, typically the echo of typed characters, is
+// parsed without waiting for input_delay
+#define SMALL_PENDING_INPUT_THRESHOLD 1024u
 
 
 // Macros {{{
@@ -1571,6 +1574,14 @@ consume_input(PS *self, PyObject *dump_callback UNUSED, id_type window_id UNUSED
 #define with_lock pthread_mutex_lock(&self->lock);
 #define end_with_lock pthread_mutex_unlock(&self->lock);
 
+static bool
+pending_input_is_small(const PS *self) {
+    // must only be called from the parser thread as read.pos is modified without the lock
+    size_t pending = self->write.pending;
+    if (self->read.sz > self->read.pos) pending += self->read.sz - self->read.pos;
+    return pending < SMALL_PENDING_INPUT_THRESHOLD;
+}
+
 static void
 run_worker(void *p, ParseData *pd, bool flush) {
     Screen *screen = (Screen *)p;
@@ -1582,7 +1593,7 @@ run_worker(void *p, ParseData *pd, bool flush) {
         pd->has_pending_input = self->read.pos < self->read.sz;
         if (pd->has_pending_input) {
             pd->time_since_new_input = pd->now - self->new_input_at;
-            if (flush || pd->time_since_new_input >= OPT(input_delay) || self->read.sz + 16 * 1024 > BUF_SZ) {
+            if (flush || pending_input_is_small(self) || pd->time_since_new_input >= OPT(input_delay) || self->read.sz + 16 * 1024 > BUF_SZ) {
                 pd->input_read = true;
                 self->dump_callback = pd->dump_callback;
                 self->now = pd->now;
@@ -1628,17 +1639,23 @@ vt_parser_create_write_buffer(Parser *p, size_t *sz) {
     return ans;
 }
 
-void
+bool
 vt_parser_commit_write(Parser *p, size_t sz) {
+    // Returns true if the pending input is small. Only uses fields modified
+    // with the lock held, so it overestimates while a parse is in progress,
+    // since read.sz includes input that is being parsed.
     PS *self = (PS *)p->state;
+    bool pending_is_small;
     with_lock {
         size_t off = self->read.sz + self->write.pending;
         if (self->new_input_at == 0) self->new_input_at = monotonic();
         if (self->write.offset > off) memmove(self->buf + off, self->buf + self->write.offset, sz);
         self->write.pending += sz;
         self->write.sz = 0;
+        pending_is_small = self->read.sz + self->write.pending < SMALL_PENDING_INPUT_THRESHOLD;
     }
     end_with_lock;
+    return pending_is_small;
 }
 
 bool

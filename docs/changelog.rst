@@ -199,6 +199,108 @@ you use a decent Wayland compositor.
 Detailed list of changes
 -------------------------------------
 
+0.49.2 [2026-10-01]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- A new option :opt:`detect_url_regex` to detect arbitrary text, such as file
+  references in compiler output, as clickable URLs under the mouse (:iss:`10407`)
+
+- Reduce input latency by processing small amounts of program output, such as
+  the echo of typed characters, immediately instead of waiting for
+  :opt:`input_delay` (:pull:`10560`)
+
+- Drag and drop: Restore the previously active tab after dropping a dragged tab
+  on the same OS window's tab bar, even if it was reordered after a hover switch
+
+- Sessions: Expand launch option variables when an option value matches the command name
+
+- Preserve transparent background colors when applying unrelated launch color overrides
+
+- ssh kitten: Preserve SSH option values following a spaced :code:`--kitten` option
+
+- Fix a memory leak when loading a corrupt PNG image that has an embedded ICC
+  color profile
+
+- Custom shaders: The builtin :code:`dim-inactive-windows` shader no longer dims
+  the tab bar and the padding, border and margin around the active window (:iss:`10524`)
+
+- Custom shaders: A new :code:`cursor-trail-motion-blur` shader that makes
+  the cursor trail glide smoothly during fast cursor movements
+
+- Vertical tabs: Improve rendering of tabs when using the ``powerline`` :opt:`tab_bar_style`
+
+- Graphics: Fix images briefly disappearing for one frame the first time an image is replaced during a synchronized update (:iss:`10538`)
+
+- X11: Fix copy and paste targeting the wrong OS window when the keyboard focus
+  is set to PointerRoot or None
+
+- diff kitten: Fix freezes and very high memory use when a very long line, such
+  as in a minified file, is changed
+
+- themes and choose fonts kittens: Fix search freezing for many seconds when
+  typing a long query, such as the full name of a theme
+
+- macOS: Fix a custom dock icon reverting to the stock icon after a progress
+  bar is cleared (:iss:`10545`)
+
+- macOS: Fix a regression in the previous release causing
+  :opt:`background_opacity` less than one with no :opt:`background_blur` making
+  the titlebar transparent (:iss:`10540`)
+
+- macOS: Fix regression in 0.49 that caused rounded rect shader to not work on
+  ancient macs with AMD GPUs (:iss:`10549`)
+
+- diff kitten: Fix search not finding matches at the end of a line
+
+- hints kitten: Fix delays of many seconds when selecting paths or line
+  numbers on a screen with long lines that contain no spaces
+
+- File transfer: Fix a security issue where a malicious program on the remote
+  machine could bypass the transfer confirmation prompt when no
+  :opt:`file_transfer_confirmation_bypass` password is set
+
+- Fix an out-of-bounds memory access when drawing a multi-line text sized
+  character with the cursor below the bottom margin of the scroll region
+
+- Fix a heap buffer underflow when parsing ANSI-C quoted strings in
+  the command line sent by shell integration via the OSC 133 escape code
+
+- macOS: Fix a regression in 0.49 that caused rendering issues after wake from
+  sleep or display re configuration under memory pressure due to a bug in
+  Apple's OpenGL drivers (:iss:`10571`)
+
+
+0.49.1 [2026-09-24]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- Drag and drop: Hover over a tab while dragging a window or a single window
+  tab to switch to it and choose a split position. Drop a window at a tab edge
+  or gap to put it into a new tab at that position. Dragging tabs now shows an
+  insertion marker rather than moving the other tabs during the drag. See
+  :doc:`overview` for details.
+
+- Splits layout: Dragging a divider now resizes only its adjacent regions,
+  consistently after rearranging windows. Fix nested dividers not tracking
+  mouse movement correctly, including when returning from a minimum size.
+
+- Splits layout: Fix windows in a nested split overlapping their neighbour by a
+  couple of pixels when the split is resized down to its minimum size.
+
+- Splits layout: Fix the next split collapsing to a single line after
+  equalizing a tab with only one window, or closing a window with
+  :code:`equalize_on_window_close` enabled (:iss:`10522`)
+
+- icat: Fix a regression in 0.49.0 :code:`--transfer-mode=memory` not displaying anything and
+  :code:`--detect-support` reporting ``files``, because the names of the POSIX
+  shared memory objects it created were missing the leading slash mandated by
+  the graphics protocol (:iss:`10517`)
+
+- Fix a packaging bug that could cause pipeline files to be omitted from some
+  kitty builds
+
+- :ac:`save_as_session`: Show an error instead of saving next to the directory
+  when the specified path is an existing directory (:iss:`10520`)
+
 0.49.0 [2026-09-21]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -308,11 +410,11 @@ Detailed list of changes
 
 - Drag and drop protocol: Deny drag sources that send identically named symlink/dir entries with an appropriate error (:cve:`2026-80430`)
 
-- Drag and drop protocol: Fix a use-after-free when a drag source item is aborted mid-transfer, where the freed remote item was still read from and written to after the drag offer was torn down
+- Drag and drop protocol: Fix a use-after-free when a drag source item is aborted mid-transfer, where the freed remote item was still read from and written to after the drag offer was torn down (:cve:`2026-95834`)
 
 - Text sizing protocol: Fix a buffer overflow when a natural width text sizing escape code contains a grapheme cluster longer than four codepoints (:cve:`2026-80431`)
 
-- ssh kitten askpass: Verify owner and permissions of SHM memory used for askpass
+- ssh kitten askpass: Verify owner and permissions of SHM memory used for askpass (:cve:`2026-95835`)
 
 - Graphics protocol: Fix a crash when transmitting image data via a file or
   shared memory object (``t=f``, ``t=t`` or ``t=s``) and the client truncates
@@ -337,7 +439,7 @@ Detailed list of changes
 
 - Color control protocol: Report unknown fields as ``unknown=<base64 encoded
   field name>`` instead of echoing the field name back verbatim, which allowed
-  using the escape code to make the terminal emit arbitrary printable ASCII text
+  using the escape code to make the terminal emit arbitrary printable ASCII text (:cve:`2026-95832`)
 
 - macOS: Fix dropping files that are provided as file promises pasting paths to
   files that no longer exist. The dropped files are now kept alive for
