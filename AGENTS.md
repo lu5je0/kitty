@@ -214,10 +214,12 @@ map ctrl+b>i enable_ime
 
 用户配置：`~/.dotfiles/kitty/kitty.conf` 里 `preedit_foreground #252525` + `preedit_background #ebdcb2`（macOS 原生输入法组词条的米黄色）。
 
-## macOS 26 视觉修正（与上游有意分歧，合并主干时注意）
+## macOS 26/27 视觉修正（与上游有意分歧，合并主干时注意）
 
 1. **回退上游 commit `b16221a1d`**（"macos: explicitly enable modern window corners on macOS 26"）：删除了 `glfw/cocoa_window.m` 中的 `apply_window_corner_curve()` 及其调用。合并主干如果冲突，**保持删除**。该提交在 glfw/glfw.py 中加的 QuartzCore 链接保留不动。
-2. **`setup.py` Info.plist 增加 `UIDesignRequiresCompatibility=True`**：让 macOS 26 (Tahoe) 使用传统 UI 设计（小窗口圆角，非 Liquid Glass）。这是保留大圆角修正的关键，合并时保留。
+2. **`setup.py` Info.plist 增加 `UIDesignRequiresCompatibility=True`**：让 macOS 26 (Tahoe) 使用传统 UI 设计（小窗口圆角，非 Liquid Glass）。这是 macOS 26 上小圆角的关键，合并时保留。
+3. **macOS 27 (Golden Gate) 的小窗口圆角：`glfw/cocoa_window.m` 末尾的 `fork_apply_small_window_corners()` constructor**：macOS 27 开始**忽略** `UIDesignRequiresCompatibility`（实测窗口 `_cornerRadius` 从 10 变 16，且与窗口尺寸无关；论坛数据：预 Tahoe = 10、Tahoe 26 = 26、Golden Gate = 20），圆角回到系统默认。AppKit 在创建 `NSApplication` 时读一次 `NSConvolutionOverride1` 这个 user default（实测就是窗口圆角半径，可用 `defaults write -g NSConvolutionOverride1 -float N` 改），所以 fork 用一个 `__attribute__((constructor))` 在 dylib 被 dlopen 时（kitty 在 `glfwInit()` 之前加载 glfw-cocoa.so，远早于 NSApplication 创建）`registerDefaults:` 成 10。**必须是 constructor**：NSApplication 建好之后再 registerDefaults 不生效（AppKit 已缓存），实测过。注册域优先级最低，所以 `defaults write -g NSConvolutionOverride1 -float N`（或对 `net.kovidgoyal.kitty`）仍能覆盖。合并时保留整段。
+4. **`glfw/cocoa_window.m` 的 `keyDown:`/`flagsChanged:` 中 IME 相关改动**见下文「特性：按 window 彻底禁用输入法」。
 
 ## 合并主干流程
 

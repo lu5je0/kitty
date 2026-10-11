@@ -1983,7 +1983,9 @@ def macos_info_plist(for_quake: str = '') -> bytes:
         CFBundleIconFile=f'{appname}.icns',
         NSHighResolutionCapable=True,
         NSSupportsAutomaticGraphicsSwitching=True,
-        # Opt out of the macOS 26 Liquid Glass design (large window corner radius etc.)
+        # Opt out of the macOS 26 Liquid Glass design (large window corner radius etc.).
+        # macOS 27 ("Golden Gate") ignores this key, there the small window corner radius is
+        # restored by the fork_apply_small_window_corners() constructor in glfw/cocoa_window.m
         UIDesignRequiresCompatibility=True,
         # Needed for dark mode in Mojave when linking against older SDKs
         NSRequiresAquaSystemAppearance='NO',

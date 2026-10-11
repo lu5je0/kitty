@@ -4970,3 +4970,24 @@ _glfwPlatformDragDataReady(const char *mime_type, const char *data, size_t sz, i
     }
     return 0;
 }
+
+// --- fork: keep the pre-Tahoe (macOS 15) window corner radius -----------------
+// macOS 26 gave us small window corners because Info.plist set
+// UIDesignRequiresCompatibility (see setup.py). macOS 27 ("Golden Gate") ignores
+// that key, so our windows suddenly get the system default radius (16pt measured
+// on 27.0.1 for every window size - Tahoe used 26, pre-Tahoe 10). AppKit reads
+// the NSConvolutionOverride1 user default (the knob behind the window corner
+// radius) once, while NSApplication is being created, so a constructor is the
+// right hook: this dylib is dlopen()ed by kitty long before glfwInit() creates
+// NSApplication (registering after that has no effect - AppKit already cached
+// the value). The registration domain has the lowest precedence, so an explicit
+// `defaults write -g NSConvolutionOverride1 -float N` (or one for
+// net.kovidgoyal.kitty) still wins over this default. When merging upstream,
+// keep this whole block.
+#define FORK_WINDOW_CORNER_RADIUS 10
+__attribute__((constructor)) static void
+fork_apply_small_window_corners(void) {
+    @autoreleasepool {
+        [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"NSConvolutionOverride1": @(FORK_WINDOW_CORNER_RADIUS) }];
+    }
+}
