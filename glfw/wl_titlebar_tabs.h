@@ -21,7 +21,8 @@ bool wl_titlebar_tabs_rounded(_GLFWwindow *window);
 bool wl_titlebar_tabs_any_drag_active(void);
 // Renders the whole bar (tabs, + button, compact window buttons, rounded top
 // corners) into the titlebar buffer being rendered by render_title_bar().
-void wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_bg, uint32_t fg, uint32_t hover_bg, bool is_dark);
+// Returns false when tabs are inactive and the upstream renderer should run.
+bool wl_titlebar_tabs_render(_GLFWwindow *window, uint8_t *output);
 // Pointer handling. Returns true when the event was consumed by the tab bar.
 bool wl_titlebar_tabs_handle_motion(_GLFWwindow *window, double x, double y);
 bool wl_titlebar_tabs_handle_button(_GLFWwindow *window, uint32_t button, uint32_t state, double x, double y);
@@ -41,12 +42,11 @@ void wl_titlebar_tabs_destroy_corner_patches(_GLFWwindow *window);
 // at the end
 // of create_shadow_tile(); a no-op for windows without titlebar tabs.
 void wl_titlebar_tabs_patch_shadow_tile(_GLFWwindow *window);
-// While tabs are shown, keeps CSD buffers alive when the compositor releases
-// them instead of letting buffer_release_event destroy them (which would force
-// a full CSD buffer rebuild on the next redraw). Hooked in buffer_release_event.
-bool wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer);
 // The compositor accepted a DND session for a torn-off tab drag and took the
 // pointer over: end the in-client drag (its ghost can no longer follow the
 // cursor and the bar must return to its normal layout). Called from
 // _glfwWaylandConfirmDragSession() in wl_window.c.
 void wl_titlebar_tabs_dnd_started(_GLFWwindow *window);
+// Restores native-tab dimensions after desktop settings reinitialize CSD.
+// Returns true if metrics changed; inactive windows are left untouched.
+bool wl_titlebar_tabs_adjust_metrics(_GLFWwindow *window);

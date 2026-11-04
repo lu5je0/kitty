@@ -151,19 +151,18 @@ prepare_ime_position_update_event(OSWindow *osw, Window *w, Screen *screen, GLFW
     unsigned int cell_width = osw->fonts_data->fcm.cell_width, cell_height = osw->fonts_data->fcm.cell_height;
     unsigned int left = w->render_data.geometry.left, top = w->render_data.geometry.top;
     if (screen_is_overlay_active(screen)) {
-        left += screen->overlay_line.cursor_x * cell_width;
+        // Anchor to the start of the pre-edit text rather than its end, so the
+        // IME candidate window does not jump horizontally as the pre-edit grows.
+        left += screen_overlay_line_start(screen) * cell_width;
         top += MIN(screen->overlay_line.ynum + screen->scrolled_by, screen->lines - 1) * cell_height;
     } else {
         left += screen->cursor->x * cell_width;
         top += screen->cursor->y * cell_height;
     }
-    // fork-local (see AGENTS.md): anchor the IME popup at the first pre-edit cell
-    // on Wayland instead of the moving pre-edit caret, so it does not jump per keystroke;
-    // shift it down a quarter cell so it does not overlap the pre-edit line. The shift
-    // applies also outside composition so the pre-composition rect (pushed per-frame by
-    // fork_ime_report_render_cursor) matches and the popup does not move when preedit starts.
+    // fork-local (see AGENTS.md): shift the Wayland popup down a quarter cell
+    // both inside and outside composition so it does not overlap the pre-edit
+    // line or move vertically when composition starts. Upstream handles anchoring.
     if (global_state.is_wayland) {
-        if (screen_is_overlay_active(screen)) left = w->render_data.geometry.left + screen->overlay_line.xstart * cell_width;
         top += cell_height / 4;
     }
     ev->cursor.left = left;
@@ -254,6 +253,14 @@ dispatch_buffered_keys(Window *w) {
         debug("Sending previously buffered key ");
         send_key_to_child(w->id, w->render_data.screen, keys + i);
     }
+    free_buffered_keys(w);
+}
+
+void
+free_buffered_keys(Window *w) {
+    GLFWkeyevent *keys = w->buffered_keys.key_data;
+    // the text of buffered events is owned by us, see on_key_input()
+    for (size_t i = 0; i < w->buffered_keys.count; i++) free((char *)keys[i].text);
     free(w->buffered_keys.key_data);
     zero_at_ptr(&w->buffered_keys);
 }
@@ -297,6 +304,8 @@ on_key_input(const GLFWkeyevent *ev) {
             debug("handled wayland IME done event\n");
             return;
         case GLFW_IME_PREEDIT_CHANGED:
+            // Empty pre-edit events are also sent without an IME, for example on focus loss
+            if (*text) global_state.ime_used = true;
             screen_update_overlay_text(screen, text);
             update_ime_position(w, screen);
             debug("updated pre-edit text: '%s'\n", text);
@@ -357,13 +366,14 @@ on_key_input(const GLFWkeyevent *ev) {
     if (w->buffered_keys.enabled) {
         if (w->buffered_keys.capacity < w->buffered_keys.count + 1) {
             w->buffered_keys.capacity = MAX(16u, w->buffered_keys.capacity + 8);
-            GLFWkeyevent *new = malloc(w->buffered_keys.capacity * sizeof(GLFWkeyevent));
+            GLFWkeyevent *new = realloc(w->buffered_keys.key_data, w->buffered_keys.capacity * sizeof(GLFWkeyevent));
             if (!new) fatal("Out of memory");
-            memcpy(new, w->buffered_keys.key_data, w->buffered_keys.count * sizeof(new[0]));
             w->buffered_keys.key_data = new;
         }
-        GLFWkeyevent *k = w->buffered_keys.key_data;
-        k[w->buffered_keys.count++] = *ev;
+        GLFWkeyevent *k = (GLFWkeyevent *)w->buffered_keys.key_data + w->buffered_keys.count++;
+        *k = *ev;
+        // ev->text is only valid for the duration of this call
+        if (ev->text && !(k->text = strdup(ev->text))) fatal("Out of memory");
         debug("buffering key until child is ready\n");
     } else send_key_to_child(w->id, screen, ev);
 #undef dispatch_key_event
@@ -717,18 +727,4 @@ fork_ime_sync_wayland_inhibit(OSWindow *osw) {
     if (!tab->num_windows) return;
     Screen *screen = tab->windows[tab->active_window].render_data.screen;
     glfwWaylandSetIMEInhibited(screen && screen->modes.mDISABLE_IME);
-}
-
-// fork-local (see AGENTS.md): on Wayland the compositor positions the IME
-// candidate popup using the last committed cursor rectangle. Upstream only
-// pushes it on key input (before the child echoes and moves the cursor) or
-// once composition has already started, so the popup first appears at the
-// previous composition's position and then jumps. Push it from the render
-// loop instead; wl_text_input.c dedupes, so unchanged rects cost nothing.
-void
-fork_ime_report_render_cursor(OSWindow *osw, Window *w) {
-    if (!global_state.is_wayland || !osw->is_focused || !osw->handle || !w->render_data.screen) return;
-    GLFWIMEUpdateEvent ev = { .type = GLFW_IME_UPDATE_CURSOR_POSITION };
-    prepare_ime_position_update_event(osw, w, w->render_data.screen, &ev);
-    glfwUpdateIMEState(osw->handle, &ev);
 }

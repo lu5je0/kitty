@@ -143,6 +143,16 @@ show_hyperlink_targets(PyObject *x) {
     }
 }
 
+static inline HyperlinkTargetPosition
+hyperlink_target_position(PyObject *x) {
+    const char *in = PyUnicode_AsUTF8(x);
+    if (!in) return HYPERLINK_TARGET_TOP;
+    if (strcmp(in, "bottom") == 0) return HYPERLINK_TARGET_BOTTOM;
+    if (strcmp(in, "below") == 0) return HYPERLINK_TARGET_BELOW;
+    if (strcmp(in, "tooltip") == 0) return HYPERLINK_TARGET_TOOLTIP;
+    return HYPERLINK_TARGET_TOP;
+}
+
 static inline BackgroundImageLayout
 bglayout(PyObject *layout_name) {
     const char *name = PyUnicode_AsUTF8(layout_name);
@@ -625,6 +635,8 @@ remap_modifiers(PyObject *val, Options *opts) {
     }
 }
 
+// Keep in sync with text_contrast_is_identity() in kitty/shaders/slang.py,
+// which selects a cell shader specialized for gamma 1 and contrast 0.
 static inline void
 text_composition_strategy(PyObject *val, Options *opts) {
     if (!PyUnicode_Check(val)) {

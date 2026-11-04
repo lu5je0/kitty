@@ -17,7 +17,7 @@ definition = Definition(
         {'keyboard_modes': 'KeyboardModeMap', 'alias_map': 'AliasMap'},
         ['KeyDefinition', 'KeyMapOptions', 'kitty.fast_data_types.SingleKey'],
     ),
-    Action('mouse_map', 'parse_mouse_map', {'mousemap': 'MouseMap'}, ['MouseMapping']),
+    Action('mouse_map', 'parse_mouse_map', {'mousemap': 'MouseMap', 'url_mappings': 'URLMappings'}, ['MouseMapping']),
     has_color_table=True,
 )
 definition.add_deprecation('deprecated_hide_window_decorations_aliases', 'x11_hide_window_decorations', 'macos_hide_titlebar')
@@ -238,7 +238,8 @@ opt(
 The sizes of the lines used for the box drawing Unicode characters. These values
 are in pts. They will be scaled by the monitor DPI to arrive at a pixel value.
 There must be four values corresponding to thin, normal, thick, and very thick
-lines.
+lines. The values apply at the configured :opt:`font_size`, when the font size
+is changed, for example by zooming, the lines are scaled proportionally.
 """,
 )
 
@@ -358,10 +359,11 @@ opt(
 Default text cursor color. If set to the special value :code:`none` the cursor will
 be rendered with a "reverse video" effect. Its color will be the color of the
 text in the cell it is over and the text will be rendered with the background
-color of the cell. Note that if the program running in the terminal sets a
-cursor color, this takes precedence. Also, the cursor colors are modified if
-the cell background and foreground colors have very low contrast. Note that some
-themes set this value, so if you want to override it, place your value after
+color of the cell, including its effective DIM/FAINT foreground color. Note
+that if the program running in the terminal sets a cursor color, this takes
+precedence. Also, the cursor colors are modified if the cell background and
+foreground colors have very low contrast. Note that some themes set this value, so if you want to
+override it, place your value after
 the lines where the theme file is included.
 """,
 )
@@ -407,9 +409,21 @@ cursor shape can be one of :code:`block`, :code:`beam`, :code:`underline`,
 """,
 )
 
-opt('cursor_beam_thickness', '1.5', option_type='positive_float', ctype='float', long_text='The thickness of the beam cursor (in pts).')
+opt(
+    'cursor_beam_thickness',
+    '1.5',
+    option_type='positive_float',
+    ctype='float',
+    long_text='The thickness of the beam cursor (in pts). Scaled proportionally when the font size is changed from :opt:`font_size`.',
+)
 
-opt('cursor_underline_thickness', '2.0', option_type='positive_float', ctype='float', long_text='The thickness of the underline cursor (in pts).')
+opt(
+    'cursor_underline_thickness',
+    '2.0',
+    option_type='positive_float',
+    ctype='float',
+    long_text='The thickness of the underline cursor (in pts). Scaled proportionally when the font size is changed from :opt:`font_size`.',
+)
 
 opt(
     'cursor_blink_interval',
@@ -461,7 +475,9 @@ See :opt:`cursor_trail_decay` to control the animation speed and :opt:`cursor_tr
 to control when a cursor trail is started. You can also have different styles of trail by
 using the :opt:`custom_shaders` option, for example: :code:`custom_shaders cursor-trail-blaze`.
 To make fast cursor movements look smoother, use :code:`custom_shaders cursor-trail-motion-blur`,
-which blurs the trail slightly along the direction it is moving.
+which blurs the trail slightly along the direction it is moving. For particles
+that fly off the cursor as it moves, use :code:`cursor-trail-railgun`,
+:code:`cursor-trail-torpedo` or :code:`cursor-trail-pixiedust`.
 """,
 )
 
@@ -494,7 +510,8 @@ values are specified, the first sets the x (horizontal) threshold and the
 second sets the y (vertical) threshold. The values represent the minimum
 number of cells the cursor must move in each dimension before the trail is
 started. When the cursor moves less than the threshold in both dimensions,
-the trail is skipped, reducing unnecessary cursor trail animation.
+the trail is skipped, reducing unnecessary cursor trail animation. The
+threshold does not apply when the cursor moves to a different window.
 """,
 )
 
@@ -1009,6 +1026,22 @@ are pressed, the URL is shown as long as the configured modifier is among them.
 
 
 opt(
+    'hyperlink_target_position',
+    'top',
+    choices=('top', 'bottom', 'below', 'tooltip'),
+    ctype='hyperlink_target_position',
+    long_text="""
+Where to display the URL shown by :opt:`show_hyperlink_targets`. :code:`top`
+and :code:`bottom` display it along that edge of the window, :code:`below`
+displays it immediately below the hovered line. :code:`tooltip` displays it
+in a small box, sized to fit the URL, just below the mouse cursor, like a web
+browser tooltip. In all cases, if the URL would cover the hovered line, it is
+displayed on the opposite side instead.
+""",
+)
+
+
+opt(
     'underline_hyperlinks',
     'hover',
     choices=('hover', 'always', 'never'),
@@ -1224,10 +1257,39 @@ Mouse buttons can be mapped to perform arbitrary actions. The syntax is:
     mouse_map button-name event-type modes action
 
 Where :code:`button-name` is one of :code:`left`, :code:`middle`, :code:`right`,
-:code:`b1` ... :code:`b8` with added keyboard modifiers. For example:
-:code:`ctrl+shift+left` refers to holding the :kbd:`Ctrl+Shift` keys while
-clicking with the left mouse button. The value :code:`b1` ... :code:`b8` can be
-used to refer to up to eight buttons on a mouse.
+:code:`b1` ... :code:`b8`, :code:`wheel_up`, :code:`wheel_down`,
+:code:`wheel_left`, :code:`wheel_right` with added keyboard modifiers. For example: :code:`ctrl+shift+left` refers to holding the
+:kbd:`Ctrl+Shift` keys while clicking with the left mouse button. The value
+:code:`b1` ... :code:`b8` can be used to refer to up to eight buttons on a
+mouse. :code:`wheel_up` and :code:`wheel_down` refer to scrolling the mouse
+wheel (or touchpad) vertically, :code:`wheel_left` and :code:`wheel_right`
+horizontally. They only support the :code:`press` event type, which is triggered
+once per wheel step. A step is one click of a classic wheel,
+one notch of a high resolution wheel or 100 pixels of touchpad travel (scaled by
+:opt:`touch_scroll_multiplier`). The direction follows the scroll direction of
+kitty, so a negative :opt:`wheel_scroll_multiplier` or
+:opt:`touch_scroll_multiplier` swaps them. Inertial (momentum) scrolling does
+not trigger them. Mapping them replaces the normal scroll behavior for that
+combination of modifiers and mode. They cannot start a selection with
+:ac:`mouse_selection`. For example, to change the font size with :kbd:`Ctrl` and
+the mouse wheel::
+
+    mouse_map ctrl+wheel_up press ungrabbed,grabbed change_font_size all +2
+    mouse_map ctrl+wheel_down press ungrabbed,grabbed change_font_size all -2
+
+Or to switch tabs by scrolling horizontally with :kbd:`Ctrl`::
+
+    mouse_map ctrl+wheel_left press ungrabbed,grabbed previous_tab
+    mouse_map ctrl+wheel_right press ungrabbed,grabbed next_tab
+
+.. note::
+    On macOS, holding :kbd:`Shift` while turning a classic mouse wheel is
+    translated by the operating system into horizontal scrolling, so such a
+    gesture triggers :code:`shift+wheel_left` and :code:`shift+wheel_right`
+    rather than :code:`shift+wheel_up` and :code:`shift+wheel_down`. Touchpads
+    are unaffected, so the same mapping can be reached by two different buttons
+    depending on the device. Prefer a modifier other than :kbd:`Shift` for
+    vertical wheel mappings that have to work with both.
 
 :code:`event-type` is one of :code:`press`, :code:`release`,
 :code:`doublepress`, :code:`triplepress`, :code:`click`, :code:`doubleclick`.
@@ -1237,6 +1299,12 @@ grabbed by the program running in the terminal, or not. The values are
 :code:`grabbed` refers to when the program running in the terminal has requested
 mouse events. Note that the click and double click events have a delay of
 :opt:`click_interval` to disambiguate from double and triple presses.
+
+The mouse pointer changes to a hand and links are highlighted on hover only when
+the current keyboard modifiers and grabbed/ungrabbed mode match a mouse mapping
+that opens the link on a single :code:`press`, :code:`release` or :code:`click`.
+Both update when modifiers are pressed or released, even if the mouse does not
+move. Mappings that require a double or triple click do not enable hover feedback.
 
 You can run kitty with the :option:`kitty --debug-input` command line option
 to see mouse events. See the builtin actions below to get a sense of what is
@@ -1789,6 +1857,20 @@ bottom and left.
 )
 
 opt(
+    'collapse_window_margins',
+    'no',
+    option_type='to_bool',
+    long_text="""
+Normally, the gap between two neighboring windows is the sum of their margins,
+so it is twice as large as the gap between a window and the edge of the
+layout area. When enabled, the margins of neighboring windows collapse into
+each other, so that the gap between two windows is the same size as the gap
+at the edges, as set by :opt:`window_margin_width`. Note that when neighboring
+windows have different margins, the gap is the average of the two.
+""",
+)
+
+opt(
     'window_padding_width',
     '0',
     option_type='edge_width',
@@ -1819,8 +1901,9 @@ opt(
     choices=('top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right'),
     long_text="""
 When the window size is not an exact multiple of the cell size, the cell area of
-the terminal window will have some extra padding on the sides. You can control
-how that padding is distributed with this option. Using a value of
+the terminal window will have some extra padding on the sides. This padding is
+inside the window border, so that the borders of neighboring windows line up.
+You can control how that padding is distributed with this option. Using a value of
 :code:`center` means the cell area will be placed centrally. A value of
 :code:`top-left` means the padding will be only at the bottom and right edges.
 The value can be one of: :code:`top-left`, :code:`top`, :code:`top-right`,
@@ -2317,7 +2400,10 @@ opt(
 The maximum number of cells that can be used to render the text in a tab.
 A value of zero means that no limit is applied. For vertical tab bars, kitty
 uses a default sidebar width sized for about twenty title cells when this is
-left unset.
+left unset. When it is set, the sidebar is made just wide enough to fit titles
+of this length along with the decorations drawn by :opt:`tab_bar_style`. With
+the :code:`fade` style, use fewer values in :opt:`tab_fade` for a narrower
+sidebar.
 """,
 )
 
@@ -2408,6 +2494,12 @@ use :code:`{sup.index}`. All data available is:
 :code:`tab.progress_percent`
     If a command running in a window reports the progress for a task, show this progress as a percentage
     from all windows in the tab, averaged. Empty string is no progress is reported.
+:code:`tab.program_status`
+    If a program running in a window reports its status using the
+    :ref:`program status protocol <program_status>`, a short symbol for the most urgent
+    status of all windows in the tab: blocked on the user, failed, finished or working
+    (with percentage, if reported), followed by the number of windows in that status,
+    if more than one. Empty string if no program reports a status.
 :code:`tab.children_mem_usage`
     The current memory usage of all child process of the tab and their descendants
 :code:`custom`
@@ -3138,6 +3230,26 @@ arguments specifying a command to run, this option is ignored.
 )
 
 opt(
+    'restore_session_after_logout',
+    'no',
+    option_type='to_bool',
+    long_text="""
+If enabled, when you log out, restart or shut down the computer while kitty is running,
+kitty saves its current state as a :ref:`session <sessions>`, including the size, position
+and state of every :term:`OS Window <os_window>` and the scrollback of every window. The next
+time kitty is started, it restores that session, instead of using :opt:`startup_session`.
+If several kitty instances were running, each is restored as a separate kitty instance, with the
+command line arguments and environment it originally had. Programs that were running in windows,
+other than the shell, are not started again. The saved session is used only once, and only when
+kitty is started without :option:`kitty --session` or a command to run. The saved state is deleted
+once it has been restored. On macOS, it is encrypted, with a key stored in your login keychain. Note
+that despite the encryption any process that runs as you can access the stored session data.
+On Linux, it is not encrypted and this requires a desktop portal that supports monitoring the
+session state. See :ref:`restore_after_logout` for details.
+""",
+)
+
+opt(
     'clipboard_control',
     'write-clipboard write-primary read-clipboard-ask read-primary-ask',
     option_type='clipboard_control',
@@ -3398,9 +3510,15 @@ opt(
     long_text="""
 The color of the kitty window's titlebar on Wayland systems with client
 side window decorations such as GNOME. A value of :code:`system` means to use
-the default system colors, a value of :code:`background` means to use the
+the default system colors, following the desktop light/dark preference. If the
+desktop has no preference, the titlebar follows the background color of the
+currently active kitty window. A value of :code:`background` means to always use the
 background color of the currently active kitty window and finally you can use an
 arbitrary color, such as :code:`#12af59` or :code:`red`.
+
+The titlebar font, its size, the placement of the buttons and the actions
+performed when clicking on the titlebar are read from the GNOME desktop settings,
+via the desktop portal.
 """,
 )
 
@@ -3721,7 +3839,7 @@ application wide: kitty's own keyboard shortcuts, :opt:`kitty_mod`,
 :code:`mouse_map` and the keys sent to the program running in the terminal all
 see the remapped modifier. Every mapping in :file:`kitty.conf` is therefore
 written in terms of the modifier a key *becomes*, not the one printed on the
-keycap — including the built-in shortcuts, so :code:`remap_modifiers ctrl super`
+keycap — including the built-in shortcuts, so :code:`remap_modifiers super:ctrl`
 moves every default :code:`ctrl+shift+…` binding onto the physical Super key
 unless you also change :opt:`kitty_mod`.
 
@@ -4735,7 +4853,7 @@ require a full restart of kitty. Particularly, when changing shortcuts for
 actions located on the macOS global menu bar, a full restart is needed. You can
 also map a keybinding to load a different config file, for example::
 
-    map f5 load_config /path/to/alternative/kitty.conf
+    map f5 load_config_file /path/to/alternative/kitty.conf
 
 Note that all options from the original :file:`kitty.conf` are discarded, in
 other words the new configuration *replace* the old ones.

@@ -915,6 +915,7 @@ extern bool init_png_reader(PyObject *module);
 extern bool init_utmp(PyObject *module);
 extern bool init_loop_utils(PyObject *module);
 extern bool init_systemd_module(PyObject *module);
+extern bool init_mime_cache(PyObject *module);
 #ifdef __APPLE__
 extern int init_CoreText(PyObject *);
 extern bool init_cocoa(PyObject *module);
@@ -980,6 +981,7 @@ PyInit_fast_data_types(void) {
     if (!init_loop_utils(m)) return NULL;
     if (!init_crypto_library(m)) return NULL;
     if (!init_systemd_module(m)) return NULL;
+    if (!init_mime_cache(m)) return NULL;
     if (!init_animations(m)) return NULL;
 
     CellAttrs a;
@@ -999,11 +1001,16 @@ PyInit_fast_data_types(void) {
     s(BLINK, blink);
 #undef s
     PyModule_AddIntConstant(m, "MARK_MASK", MARK_MASK);
+    PyModule_AddIntConstant(m, "NUM_INDEXED_IMAGE_SPECIAL_COLORS", NUM_INDEXED_IMAGE_SPECIAL_COLORS);
     PyModule_AddIntConstant(m, "DECORATION_MASK", DECORATION_MASK);
     PyModule_AddStringMacro(m, ERROR_PREFIX);
 #ifdef KITTY_VCS_REV
     PyModule_AddStringMacro(m, KITTY_VCS_REV);
 #endif
+#ifndef KITTY_VERSION_SUFFIX
+#define KITTY_VERSION_SUFFIX ""
+#endif
+    PyModule_AddStringMacro(m, KITTY_VERSION_SUFFIX);
 #ifndef DEVELOP_ROOT
 #define DEVELOP_ROOT ""
 #endif

@@ -28,6 +28,9 @@
 //========================================================================
 
 #include "internal.h"
+#if defined(_GLFW_WAYLAND) || defined(_GLFW_X11)
+#include "linux_desktop_settings.h"
+#endif
 #include "../kitty/monotonic.h"
 
 #include <assert.h>
@@ -312,6 +315,13 @@ _glfwInputKeyboard(_GLFWwindow *window, GLFWkeyevent *ev) {
 void
 _glfwInputScroll(_GLFWwindow *window, const GLFWScrollEvent *ev) {
     if (window->callbacks.scroll) window->callbacks.scroll((GLFWwindow *)window, ev);
+}
+
+// Notifies shared code of a touch event
+//
+void
+_glfwInputTouch(_GLFWwindow *window, const GLFWTouchEvent *ev) {
+    if (window->callbacks.touch) window->callbacks.touch((GLFWwindow *)window, ev);
 }
 
 // Notifies shared code of a mouse button click event
@@ -1090,6 +1100,16 @@ glfwSetScrollCallback(GLFWwindow *handle, GLFWscrollfun cbfun) {
     return cbfun;
 }
 
+GLFWAPI GLFWtouchfun
+glfwSetTouchCallback(GLFWwindow *handle, GLFWtouchfun cbfun) {
+    _GLFWwindow *window = (_GLFWwindow *)handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(window->callbacks.touch, cbfun);
+    return cbfun;
+}
+
 GLFWAPI GLFWdropeventfun
 glfwSetDropEventCallback(GLFWwindow *handle, GLFWdropeventfun cbfun) {
     _GLFWwindow *window = (_GLFWwindow *)handle;
@@ -1576,6 +1596,15 @@ GLFWAPI monotonic_t
 glfwGetTime(void) {
     _GLFW_REQUIRE_INIT_OR_RETURN(0);
     return monotonic();
+}
+
+GLFWAPI GLFWTitlebarFont
+glfwGetTitlebarFont(void) {
+#if defined(_GLFW_WAYLAND) || defined(_GLFW_X11)
+    return *glfw_current_titlebar_font();
+#else
+    return (GLFWTitlebarFont){.point_size = 11, .text_scale = 1, .bold = true};
+#endif
 }
 
 GLFWAPI GLFWtitlebartabactionfun glfwSetTitlebarTabActionCallback(GLFWtitlebartabactionfun cbfun)

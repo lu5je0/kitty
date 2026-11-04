@@ -6,6 +6,7 @@
  */
 
 #include "data-types.h"
+#include "crypto.h"
 #include "cross-platform-random.h"
 
 #include <openssl/evp.h>
@@ -119,6 +120,40 @@ alloc_secret(size_t len) {
         }
     }
     return self;
+}
+
+PyObject *
+secret_from_data(const void *data, size_t len) {
+    Secret *ans = alloc_secret(len);
+    if (ans) memcpy(ans->secret, data, len);
+    return (PyObject *)ans;
+}
+
+bool
+secret_data(PyObject *obj, const void **data, size_t *len) {
+    if (!PyObject_TypeCheck(obj, &Secret_Type)) {
+        PyErr_SetString(PyExc_TypeError, "Not a Secret object");
+        return false;
+    }
+    *data = ((Secret *)obj)->secret;
+    *len = ((Secret *)obj)->secret_len;
+    return true;
+}
+
+static PyObject *
+random_secret(PyObject *self UNUSED, PyObject *args) {
+    unsigned int len = 32;
+    if (!PyArg_ParseTuple(args, "|I", &len)) return NULL;
+    if (!len) {
+        PyErr_SetString(PyExc_ValueError, "The length of a secret must be positive");
+        return NULL;
+    }
+    Secret *ans = alloc_secret(len);
+    if (ans && !secure_random_bytes(ans->secret, len)) {
+        Py_CLEAR(ans);
+        PyErr_SetString(PyExc_OSError, "Failed to generate random bytes for a secret");
+    }
+    return (PyObject *)ans;
 }
 // }}}
 
@@ -418,12 +453,13 @@ add_data_to_be_encrypted(AES256GCMEncrypt *self, PyObject *args) {
             Py_CLEAR(ciphertext);
             return NULL;
         }
+        if (1 != EVP_CIPHER_CTX_ctrl(self->ctx, EVP_CTRL_AEAD_GET_TAG, PyBytes_GET_SIZE(tag), PyBytes_AS_STRING(tag))) {
+            Py_CLEAR(tag);
+            Py_CLEAR(ciphertext);
+            return set_error_from_openssl("Failed to get the tag");
+        }
         Py_CLEAR(self->tag);
         self->tag = tag;
-        if (1 != EVP_CIPHER_CTX_ctrl(self->ctx, EVP_CTRL_AEAD_GET_TAG, PyBytes_GET_SIZE(self->tag), PyBytes_AS_STRING(tag))) {
-            Py_CLEAR(ciphertext);
-            return NULL;
-        }
     }
     if (offset != PyBytes_GET_SIZE(ciphertext)) {
         _PyBytes_Resize(&ciphertext, offset);
@@ -496,6 +532,7 @@ new_aes256gcmdecrypt(PyTypeObject *type, PyObject *args, PyObject *kwds UNUSED) 
     // Ensure tag length is 16 because the OpenSSL verification routines will happily pass even if you set a truncated tag.
     if (tag_len < cipher_ctx_tag_length(self->ctx)) {
         PyErr_Format(PyExc_ValueError, "Tag length for AES 256 GCM must be at least %d", cipher_ctx_tag_length(self->ctx));
+        Py_CLEAR(self);
         return NULL;
     }
     if (!EVP_CIPHER_CTX_ctrl(self->ctx, EVP_CTRL_AEAD_SET_TAG, tag_len, tag)) {
@@ -584,7 +621,7 @@ static PyTypeObject AES256GCMDecrypt_Type = {
 // }}}
 
 static PyMethodDef module_methods[] = {
-    {NULL, NULL, 0, NULL} /* Sentinel */
+    METHODB(random_secret, METH_VARARGS), {NULL, NULL, 0, NULL} /* Sentinel */
 };
 
 bool

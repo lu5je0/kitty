@@ -12,7 +12,7 @@ import struct
 import subprocess
 import sys
 import tarfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from functools import lru_cache
 from itertools import chain
@@ -35,12 +35,13 @@ from kitty.cli import (
 from kitty.conf.generate import gen_go_code
 from kitty.conf.types import Definition
 from kitty.config import commented_out_default_config
-from kitty.fast_data_types import all_color_names
+from kitty.fast_data_types import NULL_COLOR_VALUE, all_color_names, default_color_table
 from kitty.guess_mime_type import known_extensions, text_mimes
 from kitty.key_encoding import config_mod_map
 from kitty.key_names import character_key_name_aliases, functional_key_name_aliases
 from kitty.options.types import Options
 from kitty.rc.base import RemoteCommand, all_command_names, command_for_name
+from kitty.rc.set_spacing import spacing_edge_map
 from kitty.remote_control import global_options_spec
 from kitty.simple_cli_definitions import CompletionSpec, parse_option_spec, serialize_as_go_string
 
@@ -440,7 +441,11 @@ def go_code_for_remote_command(name: str, cmd: RemoteCommand, template: str) -> 
     unhandled = {}
     used_options = set()
     for field in json_fields:
-        if field.go_option_name in option_map:
+        if field.field in handled_fields:
+            # the special parser is responsible for setting this field and reading its option
+            if field.go_option_name in option_map:
+                used_options.add(field.go_option_name)
+        elif field.go_option_name in option_map:
             o = option_map[field.go_option_name]
             used_options.add(field.go_option_name)
             optstring = f'options_{name}.{o.go_var_name}'
@@ -454,8 +459,6 @@ def go_code_for_remote_command(name: str, cmd: RemoteCommand, template: str) -> 
                 jc.append(f'payload.{field.struct_field_name} = escape_dict_of_strings({optstring})')
             else:
                 jc.append(f'payload.{field.struct_field_name} = {optstring}')
-        elif field.field in handled_fields:
-            pass
         else:
             unhandled[field.field] = field
     for x in tuple(unhandled):
@@ -647,6 +650,11 @@ def generate_color_names() -> str:
         + '\n\nvar ColorTable = [256]uint32{'
         + ', '.join(f'{x}' for x in Options.color_table)
         + '}\n'
+        + '\n// Fixed values for entries in ColorTable that are unset (NullColorValue)\n'
+        + 'var FixedColorTable = [256]uint32{'
+        + ', '.join(f'{x}' for x in default_color_table())
+        + '}\n'
+        + f'\nconst NullColorValue uint32 = {NULL_COLOR_VALUE}\n'
         + f'''
 var DefaultColors = struct {{
 Foreground, Background, Cursor, SelectionFg, SelectionBg string
@@ -704,6 +712,7 @@ const ImagePlaceholderChar rune = {placeholder_char}
 const SSHControlMasterTemplate = "{kc.ssh_control_master_template}"
 const RC_ENCRYPTION_PROTOCOL_VERSION string = "{kc.RC_ENCRYPTION_PROTOCOL_VERSION}"
 var VCSRevision string = ""
+var VersionSuffix string = ""
 var IsFrozenBuild string = ""
 var IsStandaloneBuild string = ""
 const HandleTermiosSignals = {Mode.HANDLE_TERMIOS_SIGNALS.value[0]}
@@ -742,7 +751,7 @@ const NoPreferenceThemeFileName = "{ThemeFile.no_preference.value}"
 
 
 @contextmanager
-def replace_if_needed(path: str, show_diff: bool = False) -> Iterator[io.StringIO]:
+def replace_if_needed(path: str, show_diff: bool = False) -> Generator[io.StringIO, None, None]:
     buf = io.StringIO()
     origb = sys.stdout
     sys.stdout = buf
@@ -802,6 +811,9 @@ func add_rc_global_opts(cmd *cli.Command) {{
 """
     with replace_if_needed('tools/cmd/at/global_opts_generated.go') as f:
         f.write(code)
+    entries = '\n'.join(f'\t{json.dumps(k)}: {{{", ".join(map(json.dumps, v))}}},' for k, v in spacing_edge_map().items())
+    with replace_if_needed('tools/cmd/at/spacing_edges_generated.go') as f:
+        f.write(f'package at\n\nvar spacing_edge_map = map[string][]string{{\n{entries}\n}}\n')
 
 
 def update_completion() -> None:

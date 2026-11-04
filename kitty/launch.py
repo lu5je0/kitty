@@ -14,12 +14,13 @@ from .cli import parse_args
 from .cli_stub import LaunchCLIOptions
 from .clipboard import set_clipboard_string, set_primary_selection
 from .constants import is_wayland
-from .fast_data_types import add_timer, get_boss, get_options, get_os_window_title, patch_color_profiles
+from .fast_data_types import COLOR_LAYER_WINDOW, add_timer, get_boss, get_options, get_os_window_title, patch_color_profiles
 from .options.utils import env as parse_env
 from .tabs import Tab, TabManager
-from .types import LayerShellConfig, OverlayType, run_once
+from .types import DockSpec, LayerShellConfig, OverlayType, dock_edges, parse_dock_spec, run_once
 from .utils import get_editor, log_error, resolve_custom_file, which
 from .window import CwdRequest, CwdRequestType, Watchers, Window
+from .window_list import WindowGroup
 
 
 class LaunchSpec(NamedTuple):
@@ -60,6 +61,8 @@ This option was added to kitty in version 0.26.0
 
 @run_once
 def options_spec() -> str:
+    from .rc.set_spacing import SPACING_SETTINGS_DOC
+
     return f"""
 --source-window
 A match expression to select the window from which data such as title, colors, env vars,
@@ -83,11 +86,22 @@ of the active window in the tab is used as the tab title. The special value
 --type
 type=choices
 default=window
-choices=window,tab,os-window,os-panel,overlay,overlay-main,background,clipboard,primary
+choices=window,window-dock,tab,tab-dock,os-window,os-panel,overlay,overlay-main,background,clipboard,primary
 Where to launch the child process:
 
 :code:`window`
     A new :term:`kitty window <window>` in the current tab
+
+:code:`window-dock`
+    A new :term:`kitty window <window>` docked to an edge of the active window
+    in the current tab. It is shown whenever that window is shown and is closed
+    when that window is closed. Use :option:`launch --dock-edge` and
+    :option:`launch --dock-size` to control where it is placed. See :ref:`docks`.
+
+:code:`tab-dock`
+    A new :term:`kitty window <window>` docked to an edge of the current tab,
+    the layout arranges the other windows in the remaining space. It is closed
+    when the last non-docked window in the tab is closed. See :ref:`docks`.
 
 :code:`tab`
     A new :term:`tab` in the current OS window. Not available when the
@@ -126,10 +140,57 @@ Where to launch the child process:
 #placeholder_for_formatting#
 
 
+--dock-edge
+type=choices
+default=bottom
+choices={','.join(dock_edges)}
+The edge at which to place a :code:`window-dock` or :code:`tab-dock` window.
+When there are multiple docks at an edge, later docks are placed inside earlier
+ones.
+
+
+--dock-size
+default=1
+The size of a :code:`window-dock` or :code:`tab-dock` window. For docks at the
+top or bottom edge this is a number of rows, for docks at the left or right edge
+a number of columns. The space for the window's margin, border and padding is
+added to it. Alternately, add a :code:`%` suffix to specify the size as a
+percentage of the window or tab being docked to, including the window's
+decorations, for example: :code:`25%`.
+
+
+--dock-skip-focus
+type=bool-set
+Prevent a :code:`window-dock` or :code:`tab-dock` window from ever getting
+keyboard focus. Useful for docks that only display information, such as status
+bars.
+
+
 --keep-focus --dont-take-focus
 type=bool-set
 Keep the focus on the currently active window instead of switching to the newly
 opened window.
+
+
+--focus-existing
+A match expression to select an existing window or tab. If a match is found,
+it is focused and nothing new is launched, otherwise the launch proceeds as
+normal. When :option:`--type <launch --type>` is :code:`tab` the expression
+selects tabs, otherwise it selects windows, in all OS Windows. See :ref:`search_syntax` for the
+syntax for specifying windows and tabs. The special value :code:`@title` matches
+the tab whose title is exactly the value of :option:`--tab-title <launch --tab-title>`
+or, for other types, the window whose title is exactly the value of
+:option:`--window-title <launch --window-title>`. Unlike a match expression,
+:code:`@title` only considers the tabs shown in the tab bar of the OS Window in
+which the new tab/window would be created, so tabs hidden by :opt:`tab_bar_filter`
+are ignored. For the :code:`os-window` and :code:`os-panel` types, it considers
+windows in all OS Windows. If :option:`--keep-focus <launch --keep-focus>`
+is also specified, the matched window/tab is not focused. Has no effect for the
+:code:`background`, :code:`clipboard` and :code:`primary` types and in
+:ref:`startup sessions <sessions>`. Useful for mapping a key to switch to a
+window or tab, creating it if it does not exist, for example::
+
+    map ctrl+1 launch --type=tab --tab-title=1 --location=by-title --focus-existing=@title
 
 
 --cwd
@@ -142,6 +203,10 @@ by the shell (needs :ref:`shell_integration` to work). The special value
 oldest foreground process associated with the currently active window rather
 than the newest foreground process. Finally, the special value :code:`root`
 refers to the process that was originally started when the window was created.
+If kitty itself started that process via a wrapper, such as :file:`/usr/bin/login`
+on macOS, the wrapper is ignored and its first child is used instead. The
+working directory reported by the shell is used only when the root process is in
+the foreground.
 
 When opening in the same working directory as the current window causes the new
 window to connect to a remote host, you can use the :option:`--hold-after-ssh`
@@ -204,13 +269,16 @@ or the kitty remote control feature with :option:`kitten @ launch --copy-env`.
 --location
 type=choices
 default=default
-choices=first,after,before,neighbor,last,vsplit,hsplit,split,default
+choices=first,after,before,neighbor,last,vsplit,hsplit,split,by-title,default
 Where to place the newly created window when it is added to a tab which already
 has existing windows in it. :code:`after` and :code:`before` place the new
 window before or after the active window. :code:`neighbor` is a synonym for
 :code:`after`. Also applies to creating a new tab, where the value of
 :code:`after` will cause the new tab to be placed next to the current tab
-instead of at the end. The values of :code:`vsplit`, :code:`hsplit` and
+instead of at the end. The value :code:`by-title` applies only to new tabs,
+it places the new tab before the first tab whose title sorts after the title
+of the new tab, as specified by :option:`--tab-title <launch --tab-title>`. This
+keeps tabs in alphabetical order, if they already are. The values of :code:`vsplit`, :code:`hsplit` and
 :code:`split` are only used by the :code:`splits` layout and control if the new
 window is placed in a vertical, horizontal or automatic split with the currently
 active window. The default is to place the window in a layout dependent manner,
@@ -395,8 +463,7 @@ from, or specify them individually, for example::
 --spacing
 type=list
 Set the margin and padding for the newly created window.
-For example: :code:`margin=20` or :code:`padding-left=10` or :code:`margin-h=30`. The shorthand form sets
-all values, the :code:`*-h` and :code:`*-v` variants set horizontal and vertical values.
+{SPACING_SETTINGS_DOC}
 Can be specified multiple times. Note that this is ignored for overlay windows as these use the settings
 from the base window.
 
@@ -489,9 +556,7 @@ def tab_for_window(boss: Boss, opts: LaunchCLIOptions, target_tab: Tab | None, n
                     y=y,
                 )
             tm = boss.os_window_map[oswid]
-        tab = tm.new_tab(empty_tab=True, location=opts.location)
-        if opts.tab_title:
-            tab.set_title(opts.tab_title)
+        tab = tm.new_tab(empty_tab=True, location=opts.location, title=opts.tab_title or '')
         tab.created_in_session_name = add_to_session
         return tab
 
@@ -569,6 +634,9 @@ def load_watch_modules(watchers: Iterable[str]) -> Watchers | None:
         w = m.get('on_cmd_startstop')
         if callable(w):
             ans.on_cmd_startstop.append(w)
+        w = m.get('on_program_status_change')
+        if callable(w):
+            ans.on_program_status_change.append(w)
         w = m.get('on_color_scheme_preference_change')
         if callable(w):
             ans.on_color_scheme_preference_change.append(w)
@@ -592,6 +660,7 @@ class LaunchKwds(TypedDict):
     marker: str | None
     cmd: list[str] | None
     overlay_for: int | None
+    dock: DockSpec | None
     stdin: bytes | None
     hold: bool
     bias: float | None
@@ -603,7 +672,7 @@ def apply_colors(window: Window, spec: Sequence[str]) -> None:
 
     colors, transparent_background_colors = parse_colors(spec)
     profiles = (window.screen.color_profile,)
-    patch_color_profiles(colors, transparent_background_colors, profiles, True)
+    patch_color_profiles(colors, transparent_background_colors, profiles, COLOR_LAYER_WINDOW)
 
 
 def parse_var(defn: Iterable[str]) -> Iterator[tuple[str, str]]:
@@ -632,6 +701,7 @@ class ForceWindowLaunch:
 
 force_window_launch = ForceWindowLaunch()
 non_window_launch_types = 'background', 'clipboard', 'primary'
+dock_launch_types = 'window-dock', 'tab-dock'
 
 
 def parse_remote_control_passwords(allow_remote_control: bool, passwords: Sequence[str]) -> dict[str, Sequence[str]] | None:
@@ -646,6 +716,27 @@ def parse_remote_control_passwords(allow_remote_control: bool, passwords: Sequen
     return remote_control_restrictions
 
 
+def find_existing(boss: Boss, opts: LaunchCLIOptions, rc_from_window: Window | None = None, tm: TabManager | None = None) -> Window | Tab | None:
+    # @title only considers the tabs visible in the tab bar of tm, the OS Window the
+    # new tab/window would be created in, so that it respects tab_bar_filter
+    q = opts.focus_existing
+    if not q:
+        return None
+    visible_tabs: tuple[Tab, ...] = tuple(tm.tabs_to_be_shown_in_tab_bar) if tm is not None else ()
+    if opts.type == 'tab':
+        if q == '@title':
+            if not opts.tab_title:
+                raise ValueError('--focus-existing=@title requires --tab-title to also be specified')
+            return next((t for t in visible_tabs if t.effective_title == opts.tab_title), None)
+        return next(boss.match_tabs(q), None)
+    if q == '@title':
+        if not opts.window_title:
+            raise ValueError('--focus-existing=@title requires --window-title to also be specified')
+        candidates: Iterable[Window] = boss.all_windows if opts.type in ('os-window', 'os-panel') else (w for t in visible_tabs for w in t)
+        return next((w for w in candidates if w.title == opts.window_title), None)
+    return next(boss.match_windows(q, rc_from_window), None)
+
+
 def _launch(
     boss: Boss,
     opts: LaunchCLIOptions,
@@ -657,6 +748,7 @@ def _launch(
     base_env: dict[str, str] | None = None,
     child_death_callback: Callable[[int, Exception | None], None] | None = None,
     startup_command_via_shell_integration: Sequence[str] | str = (),
+    restored_scrollback: bytes = b'',
 ) -> Window | None:
     source_window = boss.active_window_for_cwd
     if opts.source_window:
@@ -683,6 +775,21 @@ def _launch(
         if source_window and (qt := source_window.tabref()) and (qr := qt.tab_manager_ref()):
             tm = qr
         opts.os_window_title = get_os_window_title(tm.os_window_id) if tm else None
+    if opts.focus_existing and not force_target_tab and opts.type not in non_window_launch_types:
+        scope_tm = boss.active_tab_manager
+        if target_tab is not None:
+            scope_tm = target_tab.tab_manager_ref() or scope_tm
+        elif next_to is not None and (nt := next_to.tabref()) is not None:
+            scope_tm = nt.tab_manager_ref() or scope_tm
+        if (existing := find_existing(boss, opts, rc_from_window, scope_tm)) is not None:
+            if not opts.keep_focus:
+                if isinstance(existing, Window):
+                    boss.set_active_window(existing, switch_os_window_if_needed=True)
+                elif (aw := existing.active_window) is not None:
+                    boss.set_active_window(aw, switch_os_window_if_needed=True)
+                elif (etm := existing.tab_manager_ref()) is not None:
+                    etm.set_active_tab(existing)
+            return existing if isinstance(existing, Window) else existing.active_window
     env = get_env(opts, source_child, base_env)
     kw: LaunchKwds = {
         'allow_remote_control': opts.allow_remote_control,
@@ -695,6 +802,7 @@ def _launch(
         'marker': opts.marker or None,
         'cmd': None,
         'overlay_for': None,
+        'dock': None,
         'stdin': None,
         'hold': False,
         'bias': None,
@@ -727,7 +835,7 @@ def _launch(
             raise ValueError('--hold-after-ssh can only be supplied if --cwd=current or similar is also supplied')
         kw['hold_after_ssh'] = True
 
-    if opts.location != 'default':
+    if opts.location not in ('default', 'by-title'):
         kw['location'] = opts.location
     if opts.copy_colors and source_window:
         kw['copy_colors_from'] = source_window
@@ -793,7 +901,7 @@ def _launch(
             if exe:
                 final_cmd[0] = exe
         kw['cmd'] = final_cmd
-    if force_window_launch and opts.type not in non_window_launch_types:
+    if force_window_launch and opts.type not in non_window_launch_types and opts.type not in dock_launch_types:
         opts.type = 'window'
     if next_to and opts.type in non_window_launch_types:
         next_to = None
@@ -838,10 +946,18 @@ def _launch(
                 if kw['cwd_from'] is not None and source_window:
                     add_to_session = source_window.created_in_session_name
         kw['hold'] = opts.hold
+        dock_owner: WindowGroup | None = None
+        if opts.type in dock_launch_types:
+            kw['dock'] = parse_dock_spec(opts.dock_edge, opts.dock_size, not opts.dock_skip_focus)
         if force_target_tab and target_tab is not None:
             tab = target_tab
         else:
             tab = tab_for_window(boss, opts, target_tab, next_to, add_to_session)
+        if opts.type == 'window-dock':
+            owner_window = tab.windows.main_window_for(next_to) if next_to is not None and next_to in tab else None
+            owner_window = owner_window or tab.windows.active_main_window
+            if owner_window is None or (dock_owner := tab.windows.group_for_window(owner_window)) is None:
+                raise ValueError('A window-dock can only be created in a tab that has a window to dock it to')
         watchers = load_watch_modules(opts.watcher)
         with Window.set_ignore_focus_changes_for_new_windows(opts.keep_focus):
             new_window: Window = tab.new_window(
@@ -850,6 +966,8 @@ def _launch(
                 is_clone_launch=is_clone_launch,
                 next_to=next_to,
                 startup_command_via_shell_integration=startup_command_via_shell_integration,
+                restored_scrollback=restored_scrollback,
+                dock_owner=dock_owner,
                 **kw,
             )
             new_window.created_in_session_name = add_to_session
@@ -897,6 +1015,7 @@ def launch(
     base_env: dict[str, str] | None = None,
     child_death_callback: Callable[[int, Exception | None], None] | None = None,
     startup_command_via_shell_integration: Sequence[str] | str = (),
+    restored_scrollback: bytes = b'',
 ) -> Window | None:
     active = boss.active_window
     if opts.keep_focus and active:
@@ -913,6 +1032,7 @@ def launch(
             base_env,
             child_death_callback,
             startup_command_via_shell_integration,
+            restored_scrollback,
         )
     finally:
         if opts.keep_focus and active:

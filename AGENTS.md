@@ -254,3 +254,16 @@ map ctrl+b>i enable_ime
 
 - `macos.conf`：`macos_titlebar_tabs yes`
 - `kitty.conf`：`macos_titlebar_color dark` + 中性灰 tab 配色（`active_tab_background #626366` 等）
+
+## v0.50.0 合并记录（2026-11-04，以下说明优先于前文旧实现描述）
+
+- 合并官方 `v0.50.0`（`bb1aca6f279f1a5cfa3edd765a71650fe91b6472`）。`glfw/input.c` 的上游 titlebar font API 与 fork tab callbacks 取并集；`glfw/source-info.json` 保留两边新增源文件。生成配置与 GLFW wrapper 自动合并，保留上游新增字段及 fork 选项/导出。
+- **上游已覆盖的 IME 修复撤掉 fork 重复实现**：`3bce8cdc3` / `42eb2a1c3` 用 `screen_overlay_line_start()` 锚定 preedit 实际绘制起点（包括行尾左移），所以删除 `keys.c` 中直接用 `overlay_line.xstart` 覆盖横坐标的旧补丁；只保留 Wayland 下移 1/4 cell 的外观偏好。`2414d64e6` 的 `sync_ime_position_with_cursor()` 接管组词结束后子进程回显造成的光标移动同步，删除 `fork_ime_report_render_cursor()`、声明及每帧调用。上游在首次使用过 IME 后才启用该同步，组词中由 overlay 路径更新；合并时保留上游这一设计。
+- **IME 独立功能仍保留**：OSC 1337 按 pane 禁用、Cocoa filter 返回值 2、Wayland inhibit 每帧同步均仍需要。上游本版没有修改 `glfw/wl_text_input.c`，enable/disable 后 cursor rectangle 失效并重发的宏与 helper 也仍需保留。`glfw.c` 获焦同步放在上游 Python focus callback 之后、IME FOCUS 发送之前；失焦流程沿用上游先提交 preedit 的顺序。
+- `kitty/state.h` 接受上游 `ShaderAnimEventMask` 与 pointer-map 字段，fork 的 `wayland_titlebar_tabs_active` 移到 `OSWindow` 真正末尾。`shaders.c` 同时保留上游 pointer-map helper 与 fork 底角 helper；底角仍在帧末先描边后裁角。
+- `kitty/shaders/slang.py` 新增的上游 `SlangShaderQuery.preprocessed` 原本通过 stdin 送源代码，改为复用 fork `run_slangc_with_source()`（移除命令末尾 stdin 参数、替换 subprocess 调用），兼容 Nix shader-slang；保留上游 `-E`、include dirs 与 invocation tracker。pipeline 的 `fragment_main` / `pointer_map` defines 和 `POINTER_MAP_SIZE` 取上游，输入仍走临时文件。
+- 旧文档提到的 `on_tab_drop_move` 中 `laid_out_once` guard 已于 v0.49.2 合并撤掉：上游 `tab_insertion_target_at` / `_drop_spans()` 已安全处理未 layout 的网格 tab bar，不要恢复旧拖放算法。
+- 本机默认 Nix Clang/链接器与已有 Apple 编译产物混用会报 `Unsupported stack probing method`。构建使用 `env CC=/usr/bin/clang ./dev.sh build`，无需修改上游构建代码。
+- **Wayland CSD buffer 生命周期采用上游实现**：v0.50.0 已复用释放的 buffer，并在 back busy 时等待 release 后重绘。删除旧 `wl_titlebar_tabs_retain_released_buffer()` 及 release 早退钩子；动画改读 `!a_busy` / `!b_busy`，不再引用已删除的 `*_needs_to_be_destroyed` / `buffer_destroyed`。fork 的额外动画 ring 仍保留，rebuild guard 增加上游的 titlebar viewport 高度检查。
+- **Wayland 标题栏绘制/度量适配**：`render_title_bar()` 增加单行 `wl_titlebar_tabs_render()` 早退，fork 文件末尾的 wrapper 同时服务上游 buffer pair 和动画 ring，维持原配色、右侧紧凑按钮及圆角；普通 CSD 使用上游新桌面样式。`csd_initialize_metrics()` 末尾增加单行 `wl_titlebar_tabs_adjust_metrics()`，防止桌面设置刷新把 fork 的 33/34 栏高和阴影宽度重置。鼠标 button 钩子须检查 `!decs.pressed_button`，避免拖过 tab 后吞掉上游窗口按钮的 release。CSD 相对上游只有 10 行新增；合并时保留这些钩子，别恢复旧 buffer 接管代码。
+- **验证**：macOS 构建成功；完整测试 1392 项（728 Python + 664 Go），`OK (skipped=18)`；IME 单元、真实 nvim 端到端与 22 项 Slang 测试均通过。本机 Go 官方代理下载缓慢时，仅对命令设置 `GOPROXY=https://goproxy.cn,direct`（仍按 go.sum 校验）。开发依赖 `_ssl.cpython-314-darwin.so` 残留的旧构建机 libcrypto 路径已用 `install_name_tool` 改成 `@loader_path/../../../../../../../lib/libcrypto.3.dylib`，只修改忽略的二进制依赖。不要全局设置 `DYLD_LIBRARY_PATH`，临时覆盖全部依赖路径时曾出现字体测试 worker 崩溃，恢复正常加载后完整测试通过。本机没有 Wayland 开发头文件，未做 Linux 编译/运行验证；界面工具禁止访问终端应用，未做鼠标点击和圆角视觉验收，专用测试窗口已清理。

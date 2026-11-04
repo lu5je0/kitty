@@ -116,8 +116,11 @@ def generate_wrappers(glfw_header: str) -> None:
     pid_t glfwWaylandCompositorPID(void)
     double glfwGetWaylandCurrentMonitorFractionalScale(void)
     void glfwConfigureMomentumScroller(double friction, double min_velocity, double max_velocity, unsigned timer_interval)
+    void glfwFeedMomentumScroller(GLFWwindow *window, double dx, double dy, int keyboard_modifiers, bool stopped, monotonic_t timestamp)
+    void glfwCancelMomentumScroll(void)
     unsigned long long glfwDBusUserNotify(const GLFWDBUSNotificationData *n, GLFWDBusnotificationcreatedfun callback, void *data)
     void glfwDBusSetUserNotificationHandler(GLFWDBusnotificationactivatedfun handler)
+    bool glfwDBusMonitorSessionState(GLFWDBussessionstatefun callback)
     int glfwSetX11LaunchCommand(GLFWwindow *handle, char **argv, int argc)
     bool glfwWaylandCreateVirtualDevices(void)
     void glfwWaylandInjectMouseMotionAbsolute(unsigned int x, unsigned int y, unsigned int x_extent, unsigned int y_extent)
@@ -157,6 +160,7 @@ typedef void (* GLFWcocoarenderframefun)(GLFWwindow*);
 typedef void (*GLFWwaylandframecallbackfunc)(unsigned long long id);
 typedef void (*GLFWDBusnotificationcreatedfun)(unsigned long long, uint32_t, void*);
 typedef void (*GLFWDBusnotificationactivatedfun)(uint32_t, int, const char*);
+typedef void (*GLFWDBussessionstatefun)(uint32_t);
 {}
 
 const char* load_glfw(const char* path);

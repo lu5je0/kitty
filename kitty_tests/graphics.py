@@ -392,6 +392,98 @@ class TestGraphics(BaseTest):
         # The untouched entry must be unaffected throughout
         self.assertEqual(dc.get(b'k1'), b'b' * 200)
 
+    def test_disk_cache_entries_changed_during_defrag(self):
+        # Stale copies become holes
+        s = self.create_screen()
+        dc = s.grman.disk_cache
+        dc.small_hole_threshold = 0
+        dc.defrag_factor = 1000
+        data = {}
+        for i in range(20):
+            key = f'k{i}'.encode()
+            data[key] = bytes([65 + i]) * 100
+            dc.add(key, data[key])
+        self.assertTrue(dc.wait_for_write())
+        for i in range(12):
+            dc.remove(f'k{i}'.encode())
+            del data[f'k{i}'.encode()]
+        self.assertEqual(dc.end_of_data_offset(), 2000)
+        dc.pause_writes()
+        dc.defrag_factor = 2
+        data[b'trigger'] = b'T' * 10
+        dc.add(b'trigger', data[b'trigger'])
+        self.assertTrue(dc.wait_until_writes_paused())
+        dc.defrag_factor = 1000
+        for i in range(12, 16):
+            dc.remove(f'k{i}'.encode())
+            del data[f'k{i}'.encode()]
+        data[b'k16'] = b'r' * 60
+        dc.add(b'k16', data[b'k16'])
+        data[b'k17'] = b'm' * 70
+        dc.add(b'k17', data[b'k17'], True)
+        self.assertTrue(dc.resume_writes())
+        self.assertTrue(dc.wait_for_write())
+        for k, v in data.items():
+            self.assertEqual(dc.get(k), v)
+        holes = sorted(dc.holes())
+        for (p1, s1), (p2, s2) in zip(holes, holes[1:]):
+            self.assertLessEqual(p1 + s1, p2)
+        on_disk = sum(len(v) for k, v in data.items() if k != b'k17')
+        self.assertEqual(sum(x[1] for x in holes) + on_disk, dc.end_of_data_offset())
+        # Memory only entries own no disk space
+        dc.remove(b'k17')
+        del data[b'k17']
+        self.assertEqual(sorted(dc.holes()), holes)
+        for k, v in data.items():
+            self.assertEqual(dc.get(k), v)
+
+    def test_disk_cache_empty_entry_replaced(self):
+        dc = self.create_screen().grman.disk_cache
+        dc.small_hole_threshold = 0
+        dc.defrag_factor = 1000
+        dc.add(b'a', b'A' * 1000)
+        self.assertTrue(dc.wait_for_write())
+        dc.add(b'z', b'')
+        self.assertTrue(dc.wait_for_write())
+        dc.remove(b'a')
+        dc.add(b'c', b'C' * 100)
+        self.assertTrue(dc.wait_for_write())
+        dc.pause_writes()
+        dc.defrag_factor = 2
+        dc.add(b'z', b'Z' * 50)
+        self.assertTrue(dc.wait_until_writes_paused())
+        dc.defrag_factor = 1000
+        self.assertTrue(dc.resume_writes())
+        self.assertTrue(dc.wait_for_write())
+        self.assertEqual(dc.end_of_data_offset(), 150)
+        self.assertEqual(dc.get(b'z'), b'Z' * 50)
+        self.assertEqual(dc.get(b'c'), b'C' * 100)
+
+    def test_disk_cache_encryption_while_being_written(self):
+        s = self.create_screen()
+        dc = s.grman.disk_cache
+        dc.set_needs_encryption(True)
+        data = bytes(range(256)) * 1000 + b'xyz'
+
+        # Reads while writing return plaintext
+        dc.pause_writes()
+        dc.add(b'k1', data)
+        self.assertTrue(dc.wait_until_writes_paused())
+        self.assertEqual(dc.get(b'k1'), data)
+        self.assertTrue(dc.resume_writes())
+        self.assertTrue(dc.wait_for_write())
+        self.assertEqual(dc.num_cached_in_ram(), 0)
+        self.assertEqual(dc.get(b'k1'), data)
+
+        dc.pause_writes()
+        dc.add(b'k2', data)
+        self.assertTrue(dc.wait_until_writes_paused())
+        dc.add(b'k2', data[::-1])
+        self.assertTrue(dc.resume_writes())
+        self.assertTrue(dc.wait_for_write())
+        self.assertEqual(dc.get(b'k2'), data[::-1])
+        self.assertEqual(dc.get(b'k1'), data)
+
     def test_suppressing_gr_command_responses(self):
         s, g, pl, sl = load_helpers(self)
         self.ae(pl('abcd', s=10, v=10, q=1), 'ENODATA:Insufficient image data: 4 < 400')
@@ -444,6 +536,40 @@ class TestGraphics(BaseTest):
         # Test load query
         self.ae(pl('abcd', s=1, v=1, a='q'), 'OK')
         self.ae(g.image_count, 0)
+
+        # Test feature queries
+        def q(e, payload='', **kw):
+            res = send_command(s, ','.join(f'{k}={v}' for k, v in dict(a='q', i=31, e=e, **kw).items()), payload)
+            return res.decode('ascii') if res else None
+
+        def r(keys=''):
+            return f'\033_Gi=31{keys};OK\033\\'
+
+        self.ae(q('T', s=1, v=1, f=24, U=1), r(',e=T,f=24,s=1,v=1,U=1'))
+        self.ae(q('T', s=1, v=1, f=24, t='d', C=1, z=-3, N=1), r(',e=T,t=d,f=24,s=1,v=1,N=1,C=1,z=-3'))
+        # no image data is needed or loaded
+        self.ae(q('t', 'abcd', s=1, v=1, f=8, c=2), r(',e=t,f=8,s=1,v=1'))
+        self.ae(g.image_count, 0)
+        # keys are interpreted according to the action being queried
+        self.ae(q('p', c=2, r=3, U=1, C=1, s=1), r(',e=p,c=2,r=3,C=1,U=1'))
+        self.ae(q('f', c=2, r=3, z=40, X=1, f=8, s=1), r(',e=f,s=1,c=2,r=3,z=40,X=1'))
+        self.ae(q('a', s=3, v=1, r=2, c=1, z=-1), r(',e=a,s=3,v=1,r=2,c=1,z=-1'))
+        self.ae(q('c', r=1, c=2, w=3, X=1, C=1, U=1), r(',e=c,r=1,c=2,w=3,X=1,C=1'))
+        self.ae(q('d', d='F', p=2, s=1), r(',e=d,d=F,p=2'))
+        # unsupported values are not reported
+        self.ae(q('T', s=1, v=1, f=24, C=7, N=6, U=2), r(',e=T,f=24,s=1,v=1'))
+        self.ae(q('t', f=42, s=100000), r(',e=t'))
+        self.ae(q('a', s=4), r(',e=a'))
+        # unknown actions are not reported
+        self.ae(q('x', s=1, v=1, f=24, U=1), r())
+        # a feature query does not disturb a chunked load in progress
+        self.assertIsNone(pl('ab', i=99, s=1, v=1, f=24, m=1))
+        self.ae(q('T', U=1), r(',e=T,U=1'))
+        self.ae(pl('c', i=99, m=0), 'OK')
+        self.ae(g.image_count, 1)
+        s.reset()
+        self.ae(g.image_count, 0)
+        self.assertIsNone(q('T', U=1, q=1))
 
         # Test simple load
         for f in 32, 24:
@@ -577,7 +703,14 @@ class TestGraphics(BaseTest):
         # A shared memory object that could not be opened must also be
         # removed, and reported with the same generic error
         self.ae(pl('/kitty-test-shm-missing', s=1024, v=8, t='s'), generic_error)
-        self.ae(pl('kitty-test-shm-no-leading-slash', s=1024, v=8, t='s'), generic_error)
+        self.ae(pl('kitty-test-shm-missing-no-leading-slash', s=1024, v=8, t='s'), generic_error)
+
+        # Names without a leading slash must be accepted, as, for example,
+        # sandboxed applications on macOS cannot use a leading slash
+        name = 'kitty-test-shm-no-leading-slash'
+        shm_write(name, random_data)
+        sl(name, s=1024, v=8, t='s', expecting_data=random_data)
+        self.assertRaises(FileNotFoundError, shm_unlink, name)  # check that the object was deleted
 
         s.reset()
         self.assertEqual(g.disk_cache.total_size, 0)
@@ -844,6 +977,60 @@ class TestGraphics(BaseTest):
         self.ae(group_counts(), (4, 3, 2, 1))
         self.ae(put_image(s, 8, 16, id=2, z=-1)[1], 'OK')
         self.ae(group_counts(), (2, 1, 1, 2, 1))
+
+    def test_indexed_color_images(self):
+        s, g, pl, sl = load_helpers(self)
+        li = make_send_command(s)
+
+        # Loading
+        self.ae(pl('ab', s=1, v=1, f=8, a='q'), 'OK')
+        self.ae(g.image_count, 0)
+        img = sl(bytes(range(8)), s=4, v=2, f=8)
+        self.ae(img['indexed_px_sz'], 1)
+        img = sl(bytes(range(8)), s=2, v=2, f=16)
+        self.ae(img['indexed_px_sz'], 2)
+        data = bytes(range(256)) * 4
+        img = sl(zlib.compress(data), s=32, v=16, f=16, o='z', expecting_data=data)
+        self.ae(img['indexed_px_sz'], 2)
+        self.ae(pl(bytes(range(3)), s=3, v=1, f=8), 'OK')
+        img = g.image_for_client_id(1)
+        self.ae((img['indexed_px_sz'], img['is_4byte_aligned'], img['data']), (1, False, bytes(range(3))))
+        self.assertTrue(pl(bytes(range(5)), s=3, v=1, f=16).startswith('ENODATA'))
+        self.assertTrue(pl(b'', s=0, v=1, f=8).startswith('EINVAL'))
+
+        # Replacing an indexed image with a normal one
+        img = sl(b'abcd', s=1, v=1, f=32)
+        self.ae(img['indexed_px_sz'], 0)
+
+        # Animation is not supported
+        def unsupported(r, what='Animation'):
+            self.ae((r.code, r.msg), ('EINVAL', f'{what} is not supported for indexed color images'))
+
+        self.ae(li(b'abcd', s=2, v=2, f=8, a='t').code, 'OK')
+        unsupported(li(b'abcd', s=2, v=2, f=8, a='f'))
+        unsupported(li(b'abcd', s=1, v=1, f=32, a='f'))
+        unsupported(li(b'', a='c', r=1, c=1, w=1, h=1, x=1, s=0, v=0, f=0), 'Composition')
+        self.ae(g.image_for_client_id(1)['extra_frames'], ())
+        self.ae(li(b'abcd', s=1, v=1, f=32, a='t').code, 'OK')
+        unsupported(li(b'abcd', s=2, v=2, f=8, a='f'))
+
+        # Render data
+        cw, ch = 10, 20
+        s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch)
+        self.ae(put_image(s, 10, 20, id=1)[1], 'OK')
+        self.ae(parse_response(send_command(s, 'a=T,f=16,i=2,s=2,v=2,z=-1', b'\x01\xff' * 4)), 'OK')
+        self.ae(parse_response(send_command(s, 'a=T,f=8,i=3,s=2,v=2,z=1', b'\xf8' * 4)), 'OK')
+        self.ae(tuple((x['image_id'], x['indexed_px_sz']) for x in layers(s)), ((2, 2), (1, 0), (3, 1)))
+        self.ae(s.grman.image_count, 3)
+
+        # Refs drawn at natural size use a cheaper program, so must not share
+        # a group with scaled refs of the same image
+        s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch)
+        self.ae(parse_response(send_command(s, 'a=T,f=8,i=1,s=2,v=2', b'\x01' * 4)), 'OK')
+        self.ae(parse_response(send_command(s, 'a=p,i=1,c=1,r=1')), 'OK')
+        self.ae(parse_response(send_command(s, 'a=p,i=1')), 'OK')
+        self.ae(parse_response(send_command(s, 'a=T,f=32,i=2,s=2,v=2', b'abcd' * 4)), 'OK')
+        self.ae(tuple((x['is_unscaled'], x['group_count']) for x in layers(s)), ((True, 1), (False, 1), (True, 1), (False, 1)))
 
     def test_image_parents(self):
         cw, ch = 10, 20
@@ -1176,6 +1363,167 @@ class TestGraphics(BaseTest):
         self.ae(refs[4]['src_rect'], {'left': 0.0, 'top': 0.125 * 7, 'right': 1.0, 'bottom': 0.125 * 8})
         self.ae(refs[4]['dest_rect']['top'], 1.0 - 0.25 * 7)
 
+    def test_unicode_placeholders_reverse_scroll(self):
+        # A cell image pushed off the bottom of the screen by a reverse scroll
+        # must not come back when the screen is scrolled forward again.
+        cw, ch = 5, 10
+        s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch, lines=4)
+        put_image(s, 5, 10, num_cols=1, num_lines=1, unicode_placeholder=1, id=42)
+        s.apply_sgr('38;5;42')
+        s.cursor_position(4, 1)
+        s.draw('\U0010eeee̅')
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 1)
+        s.cursor_position(1, 1)
+        s.reverse_index()
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 0)
+        s.cursor_position(4, 1)
+        s.index()
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 0)
+        # Same via CSI T
+        s.reset()
+        s.apply_sgr('38;5;42')
+        s.cursor_position(4, 1)
+        s.draw('\U0010eeee̅')
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 1)
+        s.reverse_scroll(2)
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 0)
+        s.cursor_position(4, 1)
+        s.index(), s.index()
+        s.update_only_line_graphics_data()
+        self.ae(len(layers(s)), 0)
+
+    def test_unicode_placeholders_history_margins(self):
+        # Lines scrolled out of a region at the top of the screen (as tmux does for
+        # a pane above its status line) enter the history, and the cell images
+        # rendered for them while the view was scrolled back must move with them.
+        cw, ch = 5, 10
+        s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch, lines=6)
+        put_image(s, 5, 20, num_cols=1, num_lines=2, unicode_placeholder=1, id=42)
+
+        def draw_placeholders():
+            s.apply_sgr('38;5;42')
+            s.cursor_position(3, 1)
+            s.draw('\U0010eeee\u0305')
+            s.cursor_position(4, 1)
+            s.draw('\U0010eeee\u030d')
+            s.apply_sgr('39')
+
+        def index_lines(row, n):
+            s.cursor_position(row, 1)
+            for i in range(n):
+                s.draw('plain')
+                s.index()
+                s.carriage_return()
+            s.update_only_line_graphics_data()
+
+        def scroll_view(amt, up):
+            s.scroll(amt, up)
+            s.update_only_line_graphics_data()
+            return layers(s, s.scrolled_by)
+
+        for region in (True, False):
+            s.reset()
+            if region:
+                s.set_margins(1, s.lines - 1)
+            bottom = s.lines - 1 if region else s.lines
+            draw_placeholders()
+            index_lines(bottom, 8)
+            self.ae(len(scroll_view(6, True)), 2)
+            scroll_view(6, False)
+            index_lines(bottom, 3)
+            self.ae(len(scroll_view(9, True)), 0, f'region={region}')
+            scroll_view(9, False)
+
+        # A reverse index must not move the refs of lines in the history
+        s.reset()
+        draw_placeholders()
+        index_lines(s.lines, 5)
+
+        def ref_rows(refs):
+            return sorted(round((1 - r['dest_rect']['top']) / dy) - s.scrolled_by for r in refs)
+
+        before = ref_rows(scroll_view(6, True))
+        self.ae(before, [-3, -2])
+        scroll_view(6, False)
+        s.cursor_position(1, 1)
+        s.reverse_index()
+        s.update_only_line_graphics_data()
+        self.ae(ref_rows(scroll_view(6, True)), before)
+
+    def test_unicode_placeholders_history_fill(self):
+        # Lines popped back from the history (CSI + T, or enlarging the window with
+        # scrollback_fill_enlarged_window) move the history down, so cell images
+        # rendered for lines in the history must move with them.
+        cw, ch = 5, 10
+        s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch, lines=6)
+        put_image(s, 5, 10, num_cols=1, num_lines=1, unicode_placeholder=1, id=42)
+
+        def ref_rows(scrolled_by=0):
+            s.update_only_line_graphics_data()
+            return sorted(round((1 - r['dest_rect']['top']) / dy) - scrolled_by for r in layers(s, scrolled_by))
+
+        def rows_in_history():
+            # Render the history lines as when the view is scrolled back
+            n = s.historybuf.count
+            s.scroll(n, True)
+            ans = [r for r in ref_rows(n) if r < 0]
+            s.scroll(n, False)
+            s.update_only_line_graphics_data()
+            return ans
+
+        def setup(region):
+            # Push 'plain' and then a placeholder line into the history
+            s.reset()
+            if region:
+                s.set_margins(1, s.lines - 1)
+            s.draw('plain')
+            s.carriage_return(), s.linefeed()
+            s.apply_sgr('38;5;42')
+            s.draw('\U0010eeee\u0305')
+            s.apply_sgr('39')
+            s.cursor_position(s.lines - 1 if region else s.lines, 1)
+            s.index(), s.index()
+            self.ae(str(s.historybuf.line(0)), '\U0010eeee\u0305')
+            self.ae(rows_in_history(), [-1])
+
+        for region in (False, True):
+            setup(region)
+            s.reverse_scroll(1, True)
+            self.ae(str(s.line(0)), '\U0010eeee\u0305')
+            self.ae(rows_in_history(), [], f'region={region}')
+            self.ae(ref_rows(), [0], f'region={region}')
+
+        def classic_in_history():
+            nonlocal s, dy, layers
+            s, _, dy, put_image, _, layers, _ = put_helpers(self, cw, ch, lines=6)
+            put_image(s, cw, ch)  # a one cell image at (0, 0)
+            s.draw('img')
+            s.cursor_position(s.lines, 1)
+            s.index()
+            self.ae(ref_rows(1), [-1])
+
+        # A reverse index that does not pull lines from the history leaves classic
+        # placements in the history in place
+        classic_in_history()
+        s.cursor_position(1, 1)
+        s.reverse_index()
+        self.ae(ref_rows(), [])
+        self.ae(ref_rows(1), [-1])
+
+        # Enlarging the window pulls lines back from the history (cell images are
+        # removed on resize, so only classic placements are left to move)
+        classic_in_history()
+        self.set_options({'scrollback_fill_enlarged_window': True})
+        s.cursor_position(2, 1)
+        s.resize(s.lines + 1, s.columns)
+        self.ae(str(s.line(0)), ' img')
+        self.ae(ref_rows(), [0])
+
     def test_gr_scroll(self):
         cw, ch = 10, 20
         s, dx, dy, put_image, put_ref, layers, rect_eq = put_helpers(self, cw, ch)
@@ -1378,6 +1726,89 @@ class TestGraphics(BaseTest):
         self.ae(s.grman.image_count, 2)
         delete('I', i=iid + 1)
         self.ae(s.grman.image_count, 1)
+
+    def test_animation_frame_delete_dependents(self):
+        s = self.create_screen()
+        g = s.grman
+        li = make_send_command(s)
+
+        def t(**kw):
+            self.assertEqual(li(**kw).code, 'OK')
+
+        def load_frames():
+            t(a='t')
+            for i in '234':
+                t(payload=i * 36)
+
+        # Preserve the successor display
+        load_frames()
+        self.assertIsNone(li(a='a', i=1, c=3))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['displayed_frame_id'], img['extra_frames'][1]['id'])
+        successor = img['extra_frames'][2]['id']
+        self.assertIsNone(li(a='d', d='f', i=1, r=3))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['current_frame_index'], 2)
+        self.assertEqual(img['displayed_frame_id'], successor)
+        self.assertEqual([f['data'] for f in img['extra_frames']], [b'2' * 36, b'4' * 36])
+        s.reset()
+
+        # Preserve the root successor display
+        load_frames()
+        successor = g.image_for_client_id(1)['extra_frames'][0]['id']
+        self.assertIsNone(li(a='a', i=1, c=1))
+        self.assertIsNone(li(a='d', d='f', i=1, r=1))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['current_frame_index'], 0)
+        self.assertEqual(img['displayed_frame_id'], successor)
+        s.reset()
+
+        # Preserve the last frame display
+        load_frames()
+        self.assertIsNone(li(a='a', i=1, c=4))
+        self.assertIsNone(li(a='d', d='f', i=1, r=4))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['current_frame_index'], 2)
+        self.assertEqual(img['displayed_frame_id'], img['extra_frames'][1]['id'])
+        s.reset()
+
+        # Preserve dependent pixels
+        t(a='t')
+        t(payload='2' * 36)
+        t(payload='4' * 12, c=2, s=2, v=2)
+        expected = b'444444222222444444222222222222222222'
+        self.assertEqual(g.image_for_client_id(1)['extra_frames'][1]['data'], expected)
+        self.assertIsNone(li(a='d', d='f', i=1, r=2))
+        img = g.image_for_client_id(1)
+        self.assertEqual(len(img['extra_frames']), 1)
+        self.assertEqual(img['extra_frames'][0]['data'], expected)
+        s.reset()
+
+        # Preserve root dependents
+        t(a='t')
+        t(payload='4' * 12, c=1, s=2, v=2)
+        expected = g.image_for_client_id(1)['extra_frames'][0]['data']
+        self.assertIsNone(li(a='d', d='f', i=1, r=1))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['data'], expected)
+        self.assertFalse(img['extra_frames'])
+        s.reset()
+        self.assertEqual(g.disk_cache.total_size, 0)
+
+        # Respect the cache quota
+        g.storage_limit = 36 * 2
+        t(a='t')
+        for i in range(10):
+            t(payload='4' * 12, c=1, s=2, v=2)
+        before = g.image_for_client_id(1)
+        size = g.disk_cache.total_size
+        self.assertIsNone(li(a='d', d='f', i=1, r=1))
+        after = g.image_for_client_id(1)
+        self.assertEqual(g.disk_cache.total_size, size)
+        self.assertEqual(after['data'], before['data'])
+        self.assertEqual([f['data'] for f in after['extra_frames']], [f['data'] for f in before['extra_frames']])
+        s.reset()
+        self.assertEqual(g.disk_cache.total_size, 0)
 
     def test_animation_frame_loading(self):
         s = self.create_screen()
@@ -1634,10 +2065,10 @@ class TestGraphics(BaseTest):
         li = make_send_command(s)
         self.assertEqual(li(a='t').code, 'OK')
 
-        def chunked(payload, last_payload, **kw):
+        def chunked(payload, last_payload, cont='', **kw):
             self.assertIsNone(li(payload=payload, m=1, **kw))
-            self.assertFalse(send_command(s, 'm=1', payload))
-            return parse_full_response(send_command(s, 'm=0', last_payload))
+            self.assertFalse(send_command(s, cont + 'm=1', payload))
+            return parse_full_response(send_command(s, cont + 'm=0', last_payload))
 
         # create a new frame with continuation chunks
         res = chunked('2' * 12, '2' * 12, z=77)
@@ -1651,6 +2082,26 @@ class TestGraphics(BaseTest):
         self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 2))
         img = g.image_for_client_id(1)
         self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36},))
+        # the documented form of continuation chunks for frame data, a=f
+        # without an image id, must also get a response identifying the image
+        res = chunked('4' * 12, '4' * 12, cont='a=f,')
+        self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 3))
+        res = chunked('5' * 12, '5' * 12, cont='a=f,', r=3)
+        self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 3))
+        img = g.image_for_client_id(1)
+        self.assertEqual(img['data'], b'abcdefghijkl' * 3)
+        self.assertEqual(img['extra_frames'], ({'gap': 77, 'id': 2, 'data': b'3' * 36}, {'gap': 40, 'id': 3, 'data': b'5' * 36}))
+        # repeating the image id in continuation chunks works as well
+        res = chunked('6' * 12, '6' * 12, cont='a=f,i=1,', r=3)
+        self.assertEqual((res.code, res.image_id, res.frame_number), ('OK', 1, 3))
+        # with q=1 success is not reported but failure is
+        self.assertIsNone(chunked('7' * 12, '7' * 12, cont='a=f,', q=1))
+        self.assertIsNone(li(payload='8' * 12, m=1, q=1))
+        res = parse_full_response(send_command(s, 'a=f,m=0'))
+        self.assertEqual((res.code, res.image_id), ('ENODATA', 1))
+        # with q=2 failure is not reported either
+        self.assertIsNone(li(payload='8' * 12, m=1, q=2))
+        self.assertIsNone(parse_full_response(send_command(s, 'a=f,m=0')))
 
     def test_graphics_quota_enforcement(self):
         s = self.create_screen()

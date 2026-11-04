@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include <zlib.h>
 #include <structmember.h>
@@ -45,7 +46,7 @@ cache_key(const ImageAndFrame x, char *key) {
 // Transfers ownership of *data (a malloc() allocated pointer) to the cache,
 // setting it to NULL, on success. This avoids copying what are often many
 // megabytes of image data. Note that *data must not be used afterwards, the
-// cache write thread can modify it (encryption is done in-place) at any time.
+// cache write thread can free it at any time.
 static bool
 add_to_cache(GraphicsManager *self, const ImageAndFrame x, void **data, const size_t sz, bool memory_only) {
     char key[CACHE_KEY_BUFFER_SIZE];
@@ -277,6 +278,7 @@ grman_pause_rendering(GraphicsManager *self, GraphicsManager *dest) {
     dest->num_of_below_refs = 0;
     dest->num_of_negative_refs = 0;
     dest->num_of_positive_refs = 0;
+    dest->num_of_indexed_refs = 0;
     if (self == NULL) return;
     dest->window_id = self->window_id;
     dest->layers_dirty = true;
@@ -692,7 +694,7 @@ get_free_client_id(const GraphicsManager *self) {
     }
 
 #define MAX_DATA_SZ (4u * 100000000u)
-enum FORMATS { RGB = 24, RGBA = 32, PNG = 100 };
+enum FORMATS { INDEXED = 8, INDEXED_ALPHA = 16, RGB = 24, RGBA = 32, PNG = 100 };
 
 static bool
 is_file_transmission(const unsigned char transmission_type) {
@@ -735,10 +737,8 @@ load_image_data_from_file(
     int fd;
     *was_opened = false;
     if (is_shm) {
-        if (fname[0] != '/') {
-            FAIL_IMAGE_FILE("Failed to open shared memory object: %s with error: %s", fname, "POSIX SHM names must start with /");
-            return false;
-        }
+        // Names without a leading slash are allowed, as, for example, macOS
+        // sandboxed applications can only use names of the form group-id/name
         fd = safe_shm_open(fname, O_RDONLY, 0);
     } else {
         // The policy check has to happen before the file is opened. Merely
@@ -905,6 +905,14 @@ initialize_load_data(
             self->currently_loading.is_4byte_aligned = data_fmt == RGBA || (self->currently_loading.width % 4 == 0);
             self->currently_loading.is_opaque = data_fmt == RGB;
             break;
+        case INDEXED:
+        case INDEXED_ALPHA:
+            self->currently_loading.indexed_px_sz = data_fmt / 8;
+            self->currently_loading.data_sz = (size_t)g->data_width * g->data_height * self->currently_loading.indexed_px_sz;
+            if (!self->currently_loading.data_sz) ABRT("EINVAL", "Zero width/height not allowed");
+            self->currently_loading.is_4byte_aligned = ((size_t)self->currently_loading.width * self->currently_loading.indexed_px_sz) % 4 == 0;
+            self->currently_loading.is_opaque = data_fmt == INDEXED;
+            break;
         default: ABRT("EINVAL", "Unknown image format: %u", data_fmt);
     }
     self->currently_loading.loading_for.image_id = img->internal_id;
@@ -938,7 +946,9 @@ upload_to_gpu(GraphicsManager *self, Image *img, const bool is_opaque, const boo
         if (!make_window_context_current(self->window_id)) return;
         self->context_made_current_for_this_command = true;
     }
-    if (img->texture) { send_image_to_gpu(&img->texture->id, data, img->width, img->height, is_opaque, is_4byte_aligned, true, REPEAT_CLAMP); }
+    if (!img->texture) return;
+    if (img->indexed_px_sz) send_indexed_image_to_gpu(&img->texture->id, data, img->width, img->height, img->indexed_px_sz, is_4byte_aligned);
+    else send_image_to_gpu(&img->texture->id, data, img->width, img->height, is_opaque, is_4byte_aligned, true, REPEAT_CLAMP);
 }
 
 static Image *
@@ -958,6 +968,7 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
             free_image_resources(self, img);
             img->texture = new_texture_ref();
             img->root_frame_data_loaded = false;
+            img->indexed_px_sz = 0;
             img->is_drawn = false;
             img->current_frame_shown_at = 0;
             img->extra_framecnt = 0;
@@ -993,7 +1004,8 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
     self->currently_loading.loading_for = (const ImageAndFrame){0};
     img = process_image_data(self, img, g, fmt);
     if (!img) return NULL;
-    size_t required_sz = (size_t)(self->currently_loading.is_opaque ? 3 : 4) * self->currently_loading.width * self->currently_loading.height;
+    const size_t px_sz = self->currently_loading.indexed_px_sz ? self->currently_loading.indexed_px_sz : (self->currently_loading.is_opaque ? 3 : 4);
+    size_t required_sz = px_sz * self->currently_loading.width * self->currently_loading.height;
     if (self->currently_loading.data_sz != required_sz)
         ABRT(
             "EINVAL",
@@ -1005,6 +1017,7 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
     if (self->currently_loading.loading_completed_successfully) {
         img->width = self->currently_loading.width;
         img->height = self->currently_loading.height;
+        img->indexed_px_sz = self->currently_loading.indexed_px_sz;
         if (img->root_frame.id) remove_from_cache(self, (const ImageAndFrame){.image_id = img->internal_id, .frame_id = img->root_frame.id});
         img->root_frame = (const Frame){
             .id = ++img->frame_id_counter,
@@ -1031,8 +1044,107 @@ handle_add_command(GraphicsManager *self, const GraphicsCommand *g, const uint8_
 }
 
 static const char *
-finish_command_response(const GraphicsCommand *g, bool data_loaded) {
-    static char rbuf[sizeof(command_response) / sizeof(command_response[0]) + 128];
+supported_keys_for_query(const GraphicsCommand *g) {
+    // A query with e=<action> is a feature query. Echo back every key from it
+    // that has a non-default value which is supported when used with that
+    // action, so that clients can detect support for protocol features. A
+    // leading e=<action> tells the client that the action itself is supported.
+    static char buf[512];
+    size_t pos = 0;
+    buf[0] = 0;
+    const unsigned char action = g->report_supported;
+    if (!action || !strchr("tTqpdfac", action)) return buf;
+#define print(fmt, ...) \
+    if (sizeof(buf) - 1 > pos) pos += snprintf(buf + pos, sizeof(buf) - pos, fmt, __VA_ARGS__)
+#define ECHO_FLAG(key, attr) \
+    if (g->attr) print(",%c=%c", key, g->attr)
+#define ECHO_UINT(key, attr) \
+    if (g->attr) print(",%c=%u", key, g->attr)
+#define ECHO_INT(key, attr) \
+    if (g->attr) print(",%c=%d", key, g->attr)
+#define ECHO_ONE(key, attr) \
+    if (g->attr == 1) print(",%c=%u", key, 1u)
+    print(",e=%c", action);
+    switch (action) {
+        case 't':
+        case 'T':
+        case 'q':
+        case 'f': {
+            ECHO_FLAG('t', transmission_type);
+            ECHO_FLAG('o', compressed);
+            const uint32_t fmt = g->format;
+            if (fmt == RGB || fmt == RGBA || fmt == PNG || (action != 'f' && (fmt == INDEXED || fmt == INDEXED_ALPHA))) print(",f=%u", fmt);
+            if (g->data_width <= MAX_IMAGE_DIMENSION) ECHO_UINT('s', data_width);
+            if (g->data_height <= MAX_IMAGE_DIMENSION) ECHO_UINT('v', data_height);
+            ECHO_UINT('S', data_sz);
+            ECHO_UINT('O', data_offset);
+            if (g->usage_hints && !(g->usage_hints & ~GRAPHICS_USAGE_HINT_TRANSIENT)) print(",N=%u", g->usage_hints);
+            if (action == 'f') {
+                ECHO_UINT('x', x_offset);
+                ECHO_UINT('y', y_offset);
+                ECHO_UINT('c', other_frame_number);
+                ECHO_UINT('r', frame_number);
+                ECHO_INT('z', gap);
+                ECHO_ONE('X', blend_mode);
+                ECHO_UINT('Y', bgcolor);
+            }
+            if (action != 'T') break;
+        } /* fallthrough */
+        case 'p':
+            ECHO_UINT('p', placement_id);
+            ECHO_UINT('x', x_offset);
+            ECHO_UINT('y', y_offset);
+            ECHO_UINT('w', width);
+            ECHO_UINT('h', height);
+            ECHO_UINT('X', cell_x_offset);
+            ECHO_UINT('Y', cell_y_offset);
+            ECHO_UINT('c', num_cells);
+            ECHO_UINT('r', num_lines);
+            ECHO_ONE('C', cursor_movement);
+            ECHO_ONE('U', unicode_placement);
+            ECHO_INT('z', z_index);
+            ECHO_UINT('P', parent_id);
+            ECHO_UINT('Q', parent_placement_id);
+            ECHO_INT('H', offset_from_parent_x);
+            ECHO_INT('V', offset_from_parent_y);
+            break;
+        case 'd':
+            ECHO_FLAG('d', delete_action);
+            ECHO_UINT('p', placement_id);
+            ECHO_UINT('x', x_offset);
+            ECHO_UINT('y', y_offset);
+            ECHO_INT('z', z_index);
+            break;
+        case 'a':
+            if (g->animation_state <= 3) ECHO_UINT('s', animation_state);
+            ECHO_UINT('v', loop_count);
+            ECHO_UINT('r', frame_number);
+            ECHO_UINT('c', other_frame_number);
+            ECHO_INT('z', gap);
+            break;
+        case 'c':
+            ECHO_UINT('r', frame_number);
+            ECHO_UINT('c', other_frame_number);
+            ECHO_UINT('x', x_offset);
+            ECHO_UINT('y', y_offset);
+            ECHO_UINT('w', width);
+            ECHO_UINT('h', height);
+            ECHO_UINT('X', cell_x_offset);
+            ECHO_UINT('Y', cell_y_offset);
+            ECHO_ONE('C', compose_mode);
+            break;
+    }
+#undef ECHO_ONE
+#undef ECHO_INT
+#undef ECHO_UINT
+#undef ECHO_FLAG
+#undef print
+    return buf;
+}
+
+static const char *
+finish_command_response_with_keys(const GraphicsCommand *g, bool data_loaded, const char *extra_keys) {
+    static char rbuf[sizeof(command_response) / sizeof(command_response[0]) + 1024];
     bool is_ok_response = !command_response[0];
     if (g->quiet) {
         if (is_ok_response || g->quiet > 1) return NULL;
@@ -1050,11 +1162,17 @@ finish_command_response(const GraphicsCommand *g, bool data_loaded) {
         if (g->image_number) print(",I=%u", g->image_number);
         if (g->placement_id) print(",p=%u", g->placement_id);
         if (g->num_lines && (g->action == 'f' || g->action == 'a')) print(",r=%u", g->num_lines);
+        if (is_ok_response && extra_keys) print("%s", extra_keys);
         print(";%s", command_response);
         return rbuf;
 #undef print
     }
     return NULL;
+}
+
+static const char *
+finish_command_response(const GraphicsCommand *g, bool data_loaded) {
+    return finish_command_response_with_keys(g, data_loaded, NULL);
 }
 
 // }}}
@@ -1505,6 +1623,7 @@ grman_update_layers(
     self->num_of_below_refs = 0;
     self->num_of_negative_refs = 0;
     self->num_of_positive_refs = 0;
+    self->num_of_indexed_refs = 0;
     ImageRect r;
     float screen_width = dx * num_cols, screen_height = dy * num_rows;
     float screen_bottom = screen_top - screen_height;
@@ -1575,6 +1694,14 @@ grman_update_layers(
             rd->image_id = img->internal_id;
             rd->ref_id = ref->internal_id;
             rd->texture_id = texture_id_for_img(img);
+            rd->indexed_px_sz = img->indexed_px_sz;
+            if (img->indexed_px_sz) {
+                self->num_of_indexed_refs++;
+                // The rect is in normalized device co-ordinates, so allow for rounding errors
+                const float width_px = (r.right - r.left) / screen_width * screen_width_px;
+                const float height_px = (r.top - r.bottom) / screen_height * screen_height_px;
+                rd->is_unscaled = fabsf(width_px - ref->src_width) < 0.01f && fabsf(height_px - ref->src_height) < 0.01f;
+            }
             img->is_drawn = true;
             refitr = vt_next(refitr);
         }
@@ -1595,12 +1722,14 @@ grman_update_layers(
      ((a)->z_index == (b)->z_index && ((a)->image_id < (b)->image_id || ((a)->image_id == (b)->image_id && a->ref_id < b->ref_id))))
     QSORT(ImageRenderData, self->render_data.item, self->render_data.count, lt);
 #undef lt
-    // Calculate the group counts
+    // Calculate the group counts. Refs drawn with different programs must not
+    // be in the same group as programs are switched only between groups.
     i = 0;
     while (i < self->render_data.count) {
         id_type num_identical = 1, image_id = self->render_data.item[i].image_id, start = i;
+        const bool is_unscaled = self->render_data.item[i].is_unscaled;
         while (++i < self->render_data.count) {
-            if (self->render_data.item[i].image_id != image_id) break;
+            if (self->render_data.item[i].image_id != image_id || self->render_data.item[i].is_unscaled != is_unscaled) break;
             num_identical++;
         }
         while (num_identical > 0) { self->render_data.item[start++].group_count = num_identical--; }
@@ -1830,6 +1959,7 @@ update_current_frame(GraphicsManager *self, Image *img, const CoalescedFrameData
         data = &cfd;
     }
     upload_to_gpu(self, img, data->is_opaque, data->is_4byte_aligned, data->buf);
+    img->displayed_frame_id = current_frame(img)->id;
     if (needs_load) free(data->buf);
     img->current_frame_shown_at = monotonic();
 }
@@ -1866,6 +1996,7 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
     if (is_chunked_continuation) {
         INIT_CHUNKED_LOAD; // g now points to the command that started the chunked load
     }
+    if (img->indexed_px_sz || fmt == INDEXED || fmt == INDEXED_ALPHA) ABRT("EINVAL", "Animation is not supported for indexed color images");
     uint32_t frame_number = g->frame_number;
     if (!frame_number || frame_number > img->extra_framecnt + 2) frame_number = img->extra_framecnt + 2;
     bool is_new_frame = frame_number == img->extra_framecnt + 2;
@@ -2018,6 +2149,51 @@ handle_animation_frame_load_command(GraphicsManager *self, GraphicsCommand *g, I
 
 #undef ABRT
 
+static bool
+promote_dependents_to_keyframes(GraphicsManager *self, Image *img, const uint32_t base_id) {
+    for (unsigned i = 0; i < img->extra_framecnt; i++) {
+        Frame *f = img->extra_frames + i;
+        if (f->base_frame_id != base_id) continue;
+        CoalescedFrameData cfd = get_coalesced_frame_data(self, img, f);
+        if (!cfd.buf) return false;
+        const ImageAndFrame key = {.image_id = img->internal_id, .frame_id = f->id};
+        void *frame_data = cfd.buf;
+        const bool transient = f->transient || cfd.transient;
+        bool added = add_to_cache(self, key, &frame_data, (size_t)(cfd.is_opaque ? 3 : 4) * img->width * img->height, transient);
+        free(frame_data); // NULL if ownership was transferred to the cache
+        if (!added) return false;
+        f->transient = transient;
+        f->alpha_blend = false;
+        f->base_frame_id = 0;
+        f->bgcolor = 0;
+        f->is_opaque = cfd.is_opaque;
+        f->is_4byte_aligned = cfd.is_4byte_aligned;
+        f->x = 0;
+        f->y = 0;
+        f->width = img->width;
+        f->height = img->height;
+    }
+    return true;
+}
+
+static bool
+dependents_fit_in_cache(GraphicsManager *self, Image *img, const uint32_t base_id, const size_t victim_sz) {
+    const size_t full = (size_t)4 * img->width * img->height;
+    size_t growth = 0;
+    for (unsigned i = 0; i < img->extra_framecnt; i++) {
+        const Frame *f = img->extra_frames + i;
+        if (f->base_frame_id != base_id) continue;
+        const size_t cur = (size_t)(f->is_opaque ? 3 : 4) * f->width * f->height;
+        if (full > cur) growth += full - cur;
+    }
+    if (growth <= victim_sz) return true;
+    growth -= victim_sz;
+    const size_t limit = self->storage_limit * 5;
+    if (cache_size(self) + growth <= limit) return true;
+    remove_images(self, trim_predicate, img->internal_id);
+    return cache_size(self) + growth <= limit;
+}
+
 static Image *
 handle_delete_frame_command(GraphicsManager *self, const GraphicsCommand *g, bool *is_dirty) {
     if (!g->id && !g->image_number) {
@@ -2036,6 +2212,14 @@ handle_delete_frame_command(GraphicsManager *self, const GraphicsCommand *g, boo
     ImageAndFrame key = {.image_id = img->internal_id};
     bool remove_root = frame_number == 1;
     uint32_t removed_gap = 0;
+    const uint32_t victim_id = remove_root ? img->root_frame.id : img->extra_frames[frame_number - 2].id;
+    const Frame *victim = remove_root ? &img->root_frame : img->extra_frames + frame_number - 2;
+    const size_t victim_sz = (size_t)(victim->is_opaque ? 3 : 4) * victim->width * victim->height;
+    if (!dependents_fit_in_cache(self, img, victim_id, victim_sz) || !promote_dependents_to_keyframes(self, img, victim_id)) {
+        if (PyErr_Occurred()) PyErr_Print();
+        REPORT_ERROR("Failed to preserve frames that depend on deleted frame: %u", frame_number);
+        return NULL;
+    }
     if (remove_root) {
         key.frame_id = img->root_frame.id;
         remove_from_cache(self, key);
@@ -2059,8 +2243,9 @@ handle_delete_frame_command(GraphicsManager *self, const GraphicsCommand *g, boo
         update_current_frame(self, img, NULL);
         return NULL;
     }
-    if (removed_idx == img->current_frame_index) update_current_frame(self, img, NULL);
-    else if (removed_idx < img->current_frame_index) img->current_frame_index--;
+    const unsigned removed_index = remove_root ? 0 : removed_idx + 1;
+    if (img->current_frame_index > removed_index) img->current_frame_index--;
+    else if (img->current_frame_index == removed_index) update_current_frame(self, img, NULL);
     return NULL;
 }
 
@@ -2159,6 +2344,10 @@ cfd_free(CoalescedFrameData *p) {
 
 static void
 handle_compose_command(GraphicsManager *self, bool *is_dirty, const GraphicsCommand *g, Image *img) {
+    if (img->indexed_px_sz) {
+        set_command_failed_response("EINVAL", "Composition is not supported for indexed color images");
+        return;
+    }
     Frame *src_frame = frame_for_number(img, g->frame_number);
     if (!src_frame) {
         set_command_failed_response("ENOENT", "No source frame number %u exists in image id: %u\n", g->frame_number, img->client_id);
@@ -2309,7 +2498,13 @@ static bool
 scroll_filter_func(ImageRef *ref, Image UNUSED *img, const void *data, CellPixelSize cell UNUSED) {
     if (ref->is_virtual_ref) return false;
     ScrollData *d = (ScrollData *)data;
+    // A reverse scroll that does not pull lines back from the history leaves the history in place
+    if (d->amt > 0 && !d->scroll_history && ref->start_row + (int32_t)ref->effective_num_rows <= 0) return false;
     ref->start_row += d->amt;
+    // A cell image is tied to the placeholders on its line, which are lost when
+    // the line is scrolled off the bottom, so the ref must not come back on a
+    // later forward scroll.
+    if (is_cell_image(ref) && ref->start_row > (int32_t)d->margin_bottom) return true;
     return ref->start_row + (int32_t)ref->effective_num_rows <= d->limit;
 }
 
@@ -2341,6 +2536,13 @@ static bool
 scroll_filter_margins_func(ImageRef *ref, Image *img, const void *data, CellPixelSize cell) {
     if (ref->is_virtual_ref) return false;
     ScrollData *d = (ScrollData *)data;
+    // Lines scrolled out of a region at the top of the screen still enter the history and
+    // lines popped from the history move it down, so a cell image whose line is in the
+    // history moves with it.
+    if (d->scroll_history && is_cell_image(ref) && ref->start_row + (int32_t)ref->effective_num_rows <= 0) {
+        ref->start_row += d->amt;
+        return ref->start_row + (int32_t)ref->effective_num_rows <= d->limit;
+    }
     if (ref_within_region(ref, d->margin_top, d->margin_bottom)) {
         ref->start_row += d->amt;
         if (ref_outside_region(ref, d->margin_top, d->margin_bottom)) return true;
@@ -2649,6 +2851,12 @@ grman_handle_command(GraphicsManager *self, const GraphicsCommand *g, const uint
                     break;
                 }
             }
+            if (is_query && g->report_supported) {
+                // A feature query transmits no image data, so it must not
+                // interfere with any chunked load that is in progress
+                ret = finish_command_response_with_keys(&(const GraphicsCommand){.id = q_iid, .quiet = g->quiet}, true, supported_keys_for_query(g));
+                break;
+            }
             Image *image = handle_add_command(self, g, payload, is_dirty, iid, is_query);
             if (!self->currently_loading.loading_for.image_id) free_load_data(&self->currently_loading);
             GraphicsCommand *lg = &self->currently_loading.start_command;
@@ -2676,9 +2884,11 @@ grman_handle_command(GraphicsManager *self, const GraphicsCommand *g, const uint
             } else {
                 GraphicsCommand ag = *g;
                 if (action == 'f') {
-                    if (!ag.action) {
-                        // continuation chunk, the response must identify the image from the start command
-                        ag.action = action;
+                    ag.action = action;
+                    if (!ag.id && !ag.image_number) {
+                        // continuation chunk, which carries either no action
+                        // key or a=f, the response must identify the image
+                        // from the start command
                         ag.id = self->currently_loading.start_command.id;
                         ag.image_number = self->currently_loading.start_command.image_number;
                     }
@@ -2765,7 +2975,7 @@ image_as_dict(GraphicsManager *self, Image *img) {
         "{sI sI sI sI sI sI sI "
         "sO sI sO "
         "sI sI sI "
-        "sI sy# sN}",
+        "sI sI sy# sN sI}",
         "texture_id",
         texture_id_for_img(img),
         U(client_id),
@@ -2787,11 +2997,13 @@ image_as_dict(GraphicsManager *self, Image *img) {
         U(current_frame_index),
 
         U(animation_duration),
+        U(displayed_frame_id),
         "data",
         cfd.buf,
-        (Py_ssize_t)((cfd.is_opaque ? 3 : 4) * img->width * img->height),
+        (Py_ssize_t)((img->indexed_px_sz ? img->indexed_px_sz : (cfd.is_opaque ? 3 : 4)) * img->width * img->height),
         "extra_frames",
-        frames);
+        frames,
+        U(indexed_px_sz));
     free(cfd.buf);
     return ans;
 #undef B
@@ -2873,7 +3085,7 @@ W(update_layers) {
             ans,
             i,
             Py_BuildValue(
-                "{sN sN sI si sK sK}",
+                "{sN sN sI si sK sK sI sO}",
                 "src_rect",
                 R(src_rect),
                 "dest_rect",
@@ -2885,7 +3097,11 @@ W(update_layers) {
                 "image_id",
                 r->image_id,
                 "ref_id",
-                r->ref_id));
+                r->ref_id,
+                "indexed_px_sz",
+                (unsigned int)r->indexed_px_sz,
+                "is_unscaled",
+                r->is_unscaled ? Py_True : Py_False));
 #undef R
     }
     return ans;
@@ -2997,6 +3213,7 @@ grman_render_data(GraphicsManager *self) {
         .num_of_below_refs = self->num_of_below_refs,
         .num_of_negative_refs = self->num_of_negative_refs,
         .num_of_positive_refs = self->num_of_positive_refs,
+        .num_of_indexed_refs = self->num_of_indexed_refs,
     };
     return ans;
 }

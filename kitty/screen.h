@@ -102,6 +102,11 @@ typedef struct {
     struct {
         index_type x, y;
     } last_ime_pos;
+    // The cursor position last sent as the IME anchor outside of a composition, see sync_ime_position_with_cursor()
+    struct {
+        index_type x, y;
+        bool valid;
+    } last_ime_cursor;
 } OverlayLine;
 
 typedef struct ExtraCursor {
@@ -151,7 +156,7 @@ typedef struct {
     uint8_t drag_overlay_quadrant;     // 1=left 2=right 3=top 4=bottom 0=none
 
     uint8_t *write_buf;
-    size_t write_buf_sz, write_buf_used;
+    size_t write_buf_sz, write_buf_used, write_buf_start;
     pthread_mutex_t write_buf_lock;
 
     CursorRenderInfo cursor_render_info;
@@ -161,6 +166,7 @@ typedef struct {
     bool has_focus;
     uint8_t visibility_state; // 0 = unknown, 1 = potentially visible, 2 = not visible
     bool has_activity_since_last_focus;
+    bool track_activity;
     hyperlink_id_type active_hyperlink_id;
     HYPERLINK_POOL_HANDLE hyperlink_pool;
     ANSIBuf as_ansi_buf;
@@ -206,8 +212,8 @@ typedef struct {
         monotonic_t expires_at;
         Cursor cursor;
         ColorProfile color_profile;
-        bool inverted, cell_data_updated, cursor_visible;
-        unsigned int scrolled_by;
+        bool inverted, cell_data_updated, cursor_visible, pixel_scroll;
+        unsigned int scrolled_by, pixel_scroll_offset_y;
         LineBuf *linebuf;
         GraphicsManager *grman;
         Selections selections, url_ranges;
@@ -222,6 +228,9 @@ typedef struct {
         char_type idx_plus_1[16];
     } tab_cache;
     monotonic_t parsing_at;
+    // Set by the main thread on every parse: input_held when bytes are waiting out
+    // input_delay, input_parsed when new input was parsed
+    bool input_held, input_parsed;
     ExtraCursors extra_cursors;
     struct {
         bool active;
@@ -229,7 +238,11 @@ typedef struct {
     } dnd_chunking;
 } Screen;
 
-#define pixel_scroll_enabled(screen) (OPT(pixel_scroll) && !screen->paused_rendering.expires_at && screen->linebuf == screen->main_linebuf)
+#define live_pixel_scroll_enabled(screen) (OPT(pixel_scroll) && (screen)->linebuf == (screen)->main_linebuf)
+// While rendering is paused the pixel scroll state captured at pause time is used so that pausing does not change what is rendered
+#define pixel_scroll_enabled(screen) ((screen)->paused_rendering.expires_at ? (screen)->paused_rendering.pixel_scroll : live_pixel_scroll_enabled(screen))
+#define rendered_pixel_scroll_offset_y(screen) \
+    ((screen)->paused_rendering.expires_at ? (screen)->paused_rendering.pixel_scroll_offset_y : (screen)->pixel_scroll_offset_y)
 #define render_lines_for_screen(screen) (screen->lines + pixel_scroll_enabled(screen))
 
 void screen_align(Screen *);
@@ -291,6 +304,7 @@ void screen_report_color_stack(Screen *);
 void screen_handle_kitty_dcs(Screen *, const char *callback_name, PyObject *cmd);
 void set_title(Screen *self, PyObject *);
 void osc_context(Screen *self, PyObject *ctx);
+void program_status_report(Screen *self, PyObject *data);
 void desktop_notify(Screen *self, unsigned int, PyObject *);
 void set_icon(Screen *self, PyObject *);
 void set_dynamic_color(Screen *self, unsigned int code, PyObject *);
@@ -340,6 +354,7 @@ void screen_rescale_images(Screen *self);
 void screen_report_size(Screen *, unsigned which, unsigned modifier);
 void screen_manipulate_title_stack(Screen *, unsigned int op, unsigned int which);
 bool screen_is_overlay_active(Screen *self);
+index_type screen_overlay_line_start(const Screen *self);
 void screen_update_overlay_text(Screen *self, const char *utf8_text);
 bool screen_ime_text_around_cursor(Screen *self, char **before, char **after);
 void screen_set_key_encoding_flags(Screen *self, uint32_t val, uint32_t how);
@@ -348,7 +363,7 @@ void screen_pop_key_encoding_flags(Screen *self, uint32_t num);
 uint8_t screen_current_key_encoding_flags(Screen *self);
 void screen_modify_other_keys(Screen *self, unsigned, unsigned);
 void screen_report_key_encoding_flags(Screen *self);
-int screen_detect_url(Screen *screen, unsigned int x, unsigned int y);
+int screen_detect_url(Screen *screen, unsigned int x, unsigned int y, bool mark);
 int screen_cursor_at_a_shell_prompt(const Screen *);
 bool screen_prompt_supports_click_events(const Screen *, bool *is_relative);
 bool screen_fake_move_cursor_to_position(Screen *, index_type x, index_type y);

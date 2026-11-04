@@ -979,7 +979,8 @@ render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas
     const uint32_t fg_rgb = fg & 0xffffff;
 #define stroke_for(which) (BUTTON_STROKE_WIDTH * fscale * (decs.which.hovered ? BUTTON_HOVER_STROKE_MULT : 1.) / 2)
 
-    // order right-to-left: close, maximize, minimize (matches upstream order left-to-right)
+    // Native tabs retain the fork's compact right-side button layout. The
+    // upstream non-tab CSD uses the desktop's configured button arrangement.
     // close: plain cross, hover just thickens the stroke
     {
         const int left = right - cell_w;
@@ -1026,9 +1027,8 @@ render_compact_window_buttons(_GLFWwindow *window, WaylandTabBarState *s, Canvas
 // Replaces the freshly built shadow tile of a tabs window with the Chrome
 // Linux CSD drop shadow: the two Material Design elevation-16 gaussians
 // (offset key shadow + centered ambient shadow) blurred from the window's
-// rounded rectangle and composited source-over. The upstream tile (a tight
-// 12px 0.7-alpha box blur with square corners and no offset) reads as a dark
-// outline next to other windows. Hooked from create_shadow_tile(); the tile
+// rounded rectangle and composited source-over. This keeps the fork's shadow
+// independent of the upstream non-tab CSD style. Hooked from create_shadow_tile(); the tile
 // layout (stride, corner_size, repeating middle segments) is unchanged so the
 // upstream slicing in render_shadows() and the corner patches keep working.
 
@@ -1112,7 +1112,7 @@ bar_is_focused(_GLFWwindow *window) {
     return window->id == _glfw.focusedWindowId || (window->wl.current.toplevel_states & TOPLEVEL_STATE_ACTIVATED);
 }
 
-void
+static void
 wl_titlebar_tabs_render_bar(_GLFWwindow *window, uint8_t *output, uint32_t bar_bg, uint32_t fg, uint32_t hover_bg UNUSED, bool is_dark) {
     WaylandTabBarState *s = state_for_window(window->id, false);
     if (!s || !s->count) return;
@@ -1223,15 +1223,14 @@ static bool anim_timer_enabled = false;
 // the compositor still holds the buffer update_title_bar() is about to render
 // into (it renders into `back`, then swaps and attaches). Overwriting a buffer
 // that is still on screen tears; the render_scratch canvas above only narrows
-// that window down to a single memcpy. `*_needs_to_be_destroyed` tracks exactly
-// this ownership: damage_csd() clears it when the compositor takes the buffer
-// and wl_titlebar_tabs_retain_released_buffer() sets it again on release.
+// that window down to a single memcpy. Upstream's a_busy/b_busy flags track
+// compositor ownership, including release-triggered pending redraws.
 static bool
 titlebar_back_buffer_is_free(_GLFWwindow *window) {
     if (!decs.titlebar.surface) return true;
     const _GLFWWaylandBufferPair *b = &decs.titlebar.buffer;
-    if (b->back == b->a) return b->a_needs_to_be_destroyed;
-    if (b->back == b->b) return b->b_needs_to_be_destroyed;
+    if (b->back == b->a) return !b->a_busy;
+    if (b->back == b->b) return !b->b_busy;
     return true;
 }
 
@@ -1245,11 +1244,12 @@ titlebar_back_buffer_is_free(_GLFWwindow *window) {
 // deliberately excluded: those repaint without reallocating).
 static bool
 csd_rebuild_pending(_GLFWwindow *window) {
-    if (!decs.mapping.data || decs.buffer_destroyed) return true;
+    if (!decs.mapping.data) return true;
     if (decs.for_window_state.width != window->wl.width) return true;
     if (decs.for_window_state.height != window->wl.height) return true;
     if (decs.for_window_state.fscale != _glfwWaylandWindowScale(window)) return true;
     const bool has_titlebar = !decs.titlebar_hidden;
+    if (has_titlebar && decs.titlebar.buffer.viewport_height != decs.metrics.visible_titlebar_height) return true;
     return (has_titlebar && !decs.titlebar.surface) || (!has_titlebar && decs.titlebar.surface);
 }
 
@@ -1297,32 +1297,15 @@ ensure_anim_ring(_GLFWwindow *window, WaylandTabBarState *s) {
 }
 
 // Renders one animation frame into a free ring slot and presents it on the
-// titlebar surface. The colour selection mirrors the top of render_title_bar()
-// (wl_client_side_decorations.c); only the custom-colour values survive into
-// render_bar unchanged, everything else is recomputed there, so a drifted
-// mirror shows up as at most a wrong custom tint, never a crash.
+// titlebar surface. Both buffer paths use the same fork-local renderer and
+// colour selection, independent of the upstream non-tab CSD appearance.
 static bool
 anim_ring_paint(_GLFWwindow *window, WaylandTabBarState *s) {
     if (!decs.titlebar.surface) return false;
     if (!ensure_anim_ring(window, s)) return false;
     const int slot = !s->anim_ring.busy[0] ? 0 : (!s->anim_ring.busy[1] ? 1 : -1);
     if (slot < 0) return false;
-    const bool is_focused = bar_is_focused(window);
-    uint32_t bg = is_focused ? 0xffdddad6 : 0xffeeeeee, fg = is_focused ? 0xff444444 : 0xff888888;
-    bool is_dark = false;
-    GLFWColorScheme appearance = glfwGetCurrentSystemColorTheme(false);
-    if (decs.use_custom_titlebar_color || appearance == GLFW_COLOR_SCHEME_NO_PREFERENCE) {
-        const uint32_t c = 0xff000000 | (decs.titlebar_color & 0xffffff);
-        const double luma = 0.2126 * (((c >> 16) & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * ((c & 0xFF) / 255.0);
-        if (luma < 0.5) { fg = is_focused ? 0xffffffff : 0xffcccccc; is_dark = true; }
-        if (decs.use_custom_titlebar_color) bg = c;
-        else if (is_dark) bg = is_focused ? 0xff303030 : 0xff242424;
-    } else if (appearance == GLFW_COLOR_SCHEME_DARK) {
-        is_dark = true;
-        bg = is_focused ? 0xff303030 : 0xff242424;
-        fg = is_focused ? 0xffffffff : 0xffcccccc;
-    }
-    wl_titlebar_tabs_render_bar(window, s->anim_ring.data[slot], bg, fg, 0, is_dark);
+    if (!wl_titlebar_tabs_render(window, s->anim_ring.data[slot])) return false;
     wl_surface_attach(decs.titlebar.surface, s->anim_ring.buffer[slot], 0, 0);
     if (decs.titlebar.wp_viewport)
         wp_viewport_set_destination(decs.titlebar.wp_viewport, decs.titlebar.buffer.viewport_width, decs.titlebar.buffer.viewport_height);
@@ -1816,27 +1799,7 @@ glfwWaylandSetTitlebarTabs(GLFWwindow *handle, const GLFWTitlebarTab *tabs, size
             wl_region_destroy(region);
         }
     }
-    // Use a taller titlebar so the 24px tabs are vertically centered with
-    // breathing room, mirroring the macOS look. Metrics feed all the CSD
-    // geometry calculations, so just updating them and forcing a rebuild is
-    // enough.
-    // kwin rasterizes the titlebar subsurface and the main surface at
-    // independently rounded physical heights; when frac(vth*scale) < 0.5 the
-    // two roundings can sum to one physical pixel less than the docked area,
-    // leaving a wallpaper sliver below maximized windows. Nudge the logical
-    // height up 1 in that case so the titlebar rounding goes up (a 1px
-    // overshoot hides behind the panel, a 1px shortfall would not).
-    const double tb_scaled = TABS_TITLEBAR_HEIGHT * _glfwWaylandWindowScale(window);
-    const double tb_frac = tb_scaled - floor(tb_scaled);
-    const int vth = TABS_TITLEBAR_HEIGHT + ((tb_frac > 0.001 && tb_frac < 0.5) ? 1 : 0);
-    if (s->count > 0 && decs.metrics.visible_titlebar_height != (unsigned int)vth) {
-        // wider shadow margin for the Chrome-style drop shadow (the
-        // interactive resize border stays 12px, see restrict_shadow_input_regions)
-        decs.metrics.width = SHADOW_MARGIN;
-        decs.metrics.horizontal = 2 * decs.metrics.width;
-        decs.metrics.top = decs.metrics.width + vth;
-        decs.metrics.visible_titlebar_height = vth;
-        decs.metrics.vertical = decs.metrics.width + decs.metrics.top;
+    if (wl_titlebar_tabs_adjust_metrics(window)) {
         decs.for_window_state.width = 0;  // force ensure_csd_resources() to rebuild buffers
     }
     // csd_set_titlebar_color() also redraws the titlebar. Passing the color
@@ -1858,28 +1821,6 @@ glfwWaylandTitlebarTabsRounded(GLFWwindow *handle) {
     return handle ? wl_titlebar_tabs_rounded((_GLFWwindow*)handle) : false;
 }
 
-// Upstream's buffer_release_event destroys every CSD buffer as soon as the
-// compositor releases it and flags decs.buffer_destroyed, which makes the next
-// redraw tear down and rebuild ALL decoration buffers (munmap + re-render of
-// the bar and every shadow + re-attach of 9 surfaces). Fine for upstream's
-// rare redraws, but the tab animations commit every 16ms, turning that into a
-// per-frame rebuild storm: destroying buffers still displayed by the
-// titlebar/shadow surfaces flashes them, and the constant rebuilds make tab
-// clicks feel slow. While tabs are shown, keep released buffers alive for
-// reuse and reclaim ownership of them (the *_needs_to_be_destroyed flags) so
-// free_csd_buffers() disposes of them on resize/scale changes.
-bool
-wl_titlebar_tabs_retain_released_buffer(_GLFWwindow *window, struct wl_buffer *buffer) {
-    if (!wl_titlebar_tabs_active(window)) return false;
-#define Q(which) \
-    if (decs.which.buffer.a == buffer) { decs.which.buffer.a_needs_to_be_destroyed = true; return true; } \
-    if (decs.which.buffer.b == buffer) { decs.which.buffer.b_needs_to_be_destroyed = true; return true; }
-    Q(titlebar); Q(shadow_left); Q(shadow_top); Q(shadow_right); Q(shadow_bottom);
-    Q(shadow_upper_left); Q(shadow_upper_right); Q(shadow_lower_left); Q(shadow_lower_right);
-#undef Q
-    return false;
-}
-
 void
 wl_titlebar_tabs_dnd_started(_GLFWwindow *window) {
     if (!window) return;
@@ -1893,4 +1834,48 @@ wl_titlebar_tabs_dnd_started(_GLFWwindow *window) {
     decs.titlebar_needs_update = true;
     csd_change_title(window);
     if (!window->wl.waiting_for_swap_to_commit) wl_surface_commit(window->wl.surface);
+}
+
+// Keep native-tab colours and compact buttons independent of the upstream
+// CSD renderer. This wrapper handles both its buffer pair and our animation
+// ring, so their appearance remains identical as upstream styling evolves.
+bool
+wl_titlebar_tabs_render(_GLFWwindow *window, uint8_t *output) {
+    if (!wl_titlebar_tabs_active(window)) return false;
+    const bool is_focused = bar_is_focused(window);
+    uint32_t bg = is_focused ? 0xffdddad6 : 0xffeeeeee, fg = is_focused ? 0xff444444 : 0xff888888;
+    bool is_dark = false;
+    GLFWColorScheme appearance = glfwGetCurrentSystemColorTheme(false);
+    if (decs.use_custom_titlebar_color || appearance == GLFW_COLOR_SCHEME_NO_PREFERENCE) {
+        const uint32_t c = 0xff000000 | (decs.titlebar_color & 0xffffff);
+        const double luma = 0.2126 * (((c >> 16) & 0xFF) / 255.0) + 0.7152 * (((c >> 8) & 0xFF) / 255.0) + 0.0722 * ((c & 0xFF) / 255.0);
+        if (luma < 0.5) { fg = is_focused ? 0xffffffff : 0xffcccccc; is_dark = true; }
+        if (decs.use_custom_titlebar_color) bg = c;
+        else if (is_dark) bg = is_focused ? 0xff303030 : 0xff242424;
+    } else if (appearance == GLFW_COLOR_SCHEME_DARK) {
+        is_dark = true;
+        bg = is_focused ? 0xff303030 : 0xff242424;
+        fg = is_focused ? 0xffffffff : 0xffcccccc;
+    }
+    wl_titlebar_tabs_render_bar(window, output, bg, fg, 0, is_dark);
+    return true;
+}
+
+bool
+wl_titlebar_tabs_adjust_metrics(_GLFWwindow *window) {
+    if (!wl_titlebar_tabs_active(window)) return false;
+    // KWin rounds the titlebar and main surface heights independently. Round
+    // the header upward to avoid a one-physical-pixel gap below docked windows.
+    const double scaled = TABS_TITLEBAR_HEIGHT * _glfwWaylandWindowScale(window);
+    const double fraction = scaled - floor(scaled);
+    const unsigned height = TABS_TITLEBAR_HEIGHT + ((fraction > 0.001 && fraction < 0.5) ? 1 : 0);
+    if (decs.metrics.visible_titlebar_height == height && decs.metrics.width == SHADOW_MARGIN) return false;
+    // Retain the fork's wider Chrome-style shadow; the input region remains
+    // 12px wide (see restrict_shadow_input_regions).
+    decs.metrics.width = SHADOW_MARGIN;
+    decs.metrics.horizontal = 2 * decs.metrics.width;
+    decs.metrics.top = decs.metrics.width + height;
+    decs.metrics.visible_titlebar_height = height;
+    decs.metrics.vertical = decs.metrics.width + decs.metrics.top;
+    return true;
 }

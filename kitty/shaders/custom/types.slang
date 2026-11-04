@@ -62,6 +62,17 @@ public struct KittyCustomShaderData {
     // .rgb = trail color (falls back to cursor_color.rgb when cursor_trail_color option is "none").
     // .a = trail opacity (0..1); zero when the trail is inactive.
     public float4 cursor_trail_color;
+    // The most recent cursor moves that started a cursor trail, most recent
+    // first. Unlike the other cursor_trail_* fields these remain valid after
+    // the trail has finished, so effects started by a move can outlive the
+    // trail and effects from several moves can overlap.
+    // .x=left, .y=right, .z=top, .w=bottom UV edges of the cursor rectangle
+    // before (from) and after (to) the move.
+    public float4 cursor_trail_history_from[8];
+    public float4 cursor_trail_history_to[8];
+    // Seconds since each move, move i is in cursor_trail_history_age[i / 4][i % 4].
+    // Negative for unused entries.
+    public float4 cursor_trail_history_age[2];
     // the size in pixels of the full underlying viewport we are rendering too,
     // before applying any viewport transforms from the current group.
     // You can use t.viewport to derive the actual size and position of the
@@ -71,12 +82,37 @@ public struct KittyCustomShaderData {
     public float mouse_pointer_hidden; // 1.0 if the mouse pointer is currently hidden, 0.0 if visible
     public float cursor_trail_state;   // 1.0 if the cursor trail is actively animating, 0.0 otherwise
 
-    public float timestamp;        // time in seconds since kitty was started (millisecond precision)
-    public float last_rendered_at; // time of previous render in seconds since kitty was started (millisecond precision)
+    // Time in seconds since kitty was started. Note that this loses precision
+    // the longer kitty runs: it is accurate to 1ms only for the first ~4.7 hours
+    // and to ~64ms after a week. So for animations use wrapped_time() below,
+    // and for the time elapsed since an event, use the various *_age fields.
+    public float timestamp;
+    public float last_rendered_at; // time of previous render, same epoch and precision as timestamp
     public uint frame_counter;     // cumulative frame counter increments by one every time a frame is fully rendered, first frame is zero
-    // Time (same epoch as `timestamp`) of the most recent cursor position change that triggered a trail.
+    // Time (same epoch and precision as `timestamp`) of the most recent cursor position change that triggered a trail.
     // Zero until the cursor has moved at least twice. Pair with cursor_trail_prev_edge.
+    // Use cursor_trail_age instead to find how long ago this was.
     public float cursor_trail_change_time;
+
+    // timestamp split into whole seconds and the fraction of the current
+    // second, which together are exact however long kitty runs. Usually you
+    // want to use wrapped_time() below instead of these.
+    public uint timestamp_seconds;
+    public float timestamp_fraction; // in [0, 1)
+    // Seconds between the previous render and this one, zero for the first render.
+    public float time_since_last_render;
+    // Seconds since cursor_trail_change_time, negative when cursor_trail_change_time is zero.
+    public float cursor_trail_age;
+
+    // Seconds since kitty was started, wrapped to [0, period_seconds). Unlike
+    // timestamp, this keeps sub-millisecond precision however long kitty runs,
+    // as long as period_seconds is at most an hour or so. The value jumps back
+    // to zero once every period, so either use a period over which your
+    // animation repeats seamlessly, or a long one so that the jump is rare.
+    public float
+    wrapped_time(uint period_seconds) {
+        return float(timestamp_seconds % period_seconds) + timestamp_fraction;
+    }
 }
 
 // A texture kitty renders into, addressed in the same UV co-ordinate space as
@@ -119,14 +155,20 @@ public struct KittyTextures {
 
     public float2 pos; // the position of this pixel in the viewport (UV coordinates, [0,1] range, origin at bottom-left)
 
-    // Some group related uniforms
+    // Some group related uniforms. These are here rather than in
+    // KittyCustomShaderData as that is shared by all groups, while these can
+    // differ from group to group.
 
     // The viewport for this group in the form (x, y, width, height) where (x, y) is the
     // bottom-left corner, with (0, 0) at the bottom-left of the screen and y increasing upwards
     // (UV coordinates). Defaults to (0, 0, 1, 1) when no viewport is defined for the group.
     public float4 viewport;
-    // The value after applying the animation easing curve to time since animation start.
-    // Zero when no animation is active.
+    // Goes from zero to one over animation_duration after the group's
+    // animation starts, with the animation_curve applied, then stays at one.
+    // If animation_reverse is set, it goes back down to zero after the
+    // animation stops, going up and down again animation_loops - 1 more
+    // times. Always zero for groups that run on every frame and for
+    // groups that have neither animation_duration nor a stop duration.
     public float animation_progress;
     // The index of the current group in the pipeline.
     public int group;

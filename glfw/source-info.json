@@ -67,6 +67,7 @@
       "null_joystick.h",
       "linux_notify.h",
       "linux_desktop_settings.h",
+      "linux_session_monitor.h",
       "wl_client_side_decorations.h",
       "main_loop.h",
       "wl_titlebar_tabs.h"
@@ -93,6 +94,7 @@
       "staging/xdg-toplevel-drag/xdg-toplevel-drag-v1.xml",
       "unstable/pointer-gestures/pointer-gestures-unstable-v1.xml",
       "unstable/xdg-output/xdg-output-unstable-v1.xml",
+
       "kwin-blur-v1.xml",
       "wlr-layer-shell-unstable-v1.xml",
       "wlr-virtual-pointer-unstable-v1.xml",
@@ -113,11 +115,12 @@
       "osmesa_context.c",
       "backend_utils.c",
       "linux_joystick.c",
-      "linux_notify.c",
       "wl_titlebar_tabs.c",
       "linux_desktop_settings.c",
       "null_joystick.c",
       "momentum-scroll.c",
+      "linux_notify.c",
+      "linux_session_monitor.c",
       "wl_inject.c"
     ]
   },
@@ -160,6 +163,7 @@
       "null_joystick.h",
       "linux_notify.h",
       "linux_desktop_settings.h",
+      "linux_session_monitor.h",
       "main_loop.h"
     ],
     "sources": [
@@ -178,7 +182,8 @@
       "null_joystick.c",
       "linux_desktop_settings.c",
       "momentum-scroll.c",
-      "linux_notify.c"
+      "linux_notify.c",
+      "linux_session_monitor.c"
     ]
   }
 }

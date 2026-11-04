@@ -32,6 +32,7 @@
 #include "math.h"
 #include "backend_utils.h"
 #include "linux_notify.h"
+#include "linux_session_monitor.h"
 #include "../kitty/monotonic.h"
 
 #include <X11/cursorfont.h>
@@ -457,11 +458,12 @@ disableRawMouseMotion(_GLFWwindow *window UNUSED) {
     XISelectEvents(_glfw.x11.display, _glfw.x11.root, &em, 1);
 }
 
-// Enable XI2 smooth scrolling events on a window
+// Select XI2 smooth scrolling events on a window if there are scroll devices,
+// otherwise deselect them
 //
 static void
-enableSmoothScrolling(_GLFWwindow *window) {
-    if (!_glfw.x11.xi.num_scroll_devices) return;
+updateSmoothScrolling(_GLFWwindow *window) {
+    if (!_glfw.x11.xi.available) return;
     // Select XI_Motion events on the window
     XIEventMask em;
     unsigned char mask[XIMaskLen(XI_Motion)] = {0};
@@ -469,9 +471,17 @@ enableSmoothScrolling(_GLFWwindow *window) {
     em.deviceid = XIAllDevices;
     em.mask_len = sizeof(mask);
     em.mask = mask;
-    XISetMask(mask, XI_Motion);
+    if (_glfw.x11.xi.num_scroll_devices) XISetMask(mask, XI_Motion);
 
     XISelectEvents(_glfw.x11.display, window->x11.handle, &em, 1);
+}
+
+// Return true if the core wheel button event was emulated by the X server from
+// smooth scroll valuators that have already been handled via XI_Motion
+//
+static bool
+isEmulatedScrollButton(const XButtonEvent *event) {
+    return _glfw.x11.xi.num_scroll_devices && _glfw.x11.xi.last_smooth_scroll_time != CurrentTime && event->time == _glfw.x11.xi.last_smooth_scroll_time;
 }
 
 static void
@@ -854,7 +864,7 @@ createNativeWindow(_GLFWwindow *window, const _GLFWwndconfig *wndconfig, Visual 
     if (_glfw.hints.window.blur_radius > 0) _glfwPlatformSetWindowBlur(window, _glfw.hints.window.blur_radius);
 
     // Enable XI2 smooth scrolling if available
-    enableSmoothScrolling(window);
+    updateSmoothScrolling(window);
 
     return true;
 }
@@ -1392,7 +1402,8 @@ handle_xi_motion_event(_GLFWwindow *window, XIDeviceEvent *de) {
             }
         }
     }
-    if (!scroll_valuator_found) {
+    if (scroll_valuator_found) _glfw.x11.xi.last_smooth_scroll_time = de->time;
+    else {
         x11_cancel_momentum_scroll_timer();
         glfw_cancel_momentum_scroll();
         handle_mouse_move_event(window, (int)de->event_x, (int)de->event_y);
@@ -1823,9 +1834,13 @@ processEvent(XEvent *event) {
                     XIHierarchyEvent *he = (XIHierarchyEvent *)event->xcookie.data;
                     // Check if any devices were added or removed
                     for (int i = 0; i < he->num_info; i++) {
-                        if (he->info[i].flags & (XISlaveAdded | XISlaveRemoved | XIMasterAdded | XIMasterRemoved)) {
-                            // Re-read scroll devices when devices are added or removed
+                        if (he->info[i].flags & (XISlaveAdded | XISlaveRemoved | XIMasterAdded | XIMasterRemoved | XIDeviceEnabled | XIDeviceDisabled)) {
+                            // Re-read scroll devices when devices are added, removed, enabled or disabled
+                            // and update the smooth scrolling event selection on existing windows
                             read_xi_scroll_devices();
+                            for (_GLFWwindow *w = _glfw.windowListHead; w; w = w->next) {
+                                if (w->x11.handle) updateSmoothScrolling(w);
+                            }
                             break;
                         }
                     }
@@ -1956,17 +1971,21 @@ processEvent(XEvent *event) {
                 _glfwInputMouseClick(window, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, mods);
             }
 
-            // Modern X provides scroll events as mouse button presses
-            // Only use these if smooth scrolling is not available
+            // Modern X provides scroll events as mouse button presses. Ignore
+            // the ones the server emulated from smooth scroll valuators, as those
+            // have already been handled via XI_Motion. Other wheel button presses,
+            // such as from XTEST (x11vnc, xdotool) are handled normally.
             else if (event->xbutton.button == Button4) {
-                if (!_glfw.x11.xi.num_scroll_devices) _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .y_offset = 1, .unscaled.y = 1});
+                if (!isEmulatedScrollButton(&event->xbutton))
+                    _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .y_offset = 1, .unscaled.y = 1});
             } else if (event->xbutton.button == Button5) {
-                if (!_glfw.x11.xi.num_scroll_devices)
+                if (!isEmulatedScrollButton(&event->xbutton))
                     _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .y_offset = -1, .unscaled.y = -1});
             } else if (event->xbutton.button == Button6) {
-                if (!_glfw.x11.xi.num_scroll_devices) _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .x_offset = 1, .unscaled.x = 1});
+                if (!isEmulatedScrollButton(&event->xbutton))
+                    _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .x_offset = 1, .unscaled.x = 1});
             } else if (event->xbutton.button == Button7) {
-                if (!_glfw.x11.xi.num_scroll_devices)
+                if (!isEmulatedScrollButton(&event->xbutton))
                     _glfwInputScroll(window, &(GLFWScrollEvent){.keyboard_modifiers = mods, .x_offset = -1, .unscaled.x = -1});
             }
 
@@ -3434,6 +3453,11 @@ glfwDBusUserNotify(const GLFWDBUSNotificationData *n, GLFWDBusnotificationcreate
 GLFWAPI void
 glfwDBusSetUserNotificationHandler(GLFWDBusnotificationactivatedfun handler) {
     glfw_dbus_set_user_notification_activated_handler(handler);
+}
+
+GLFWAPI bool
+glfwDBusMonitorSessionState(GLFWDBussessionstatefun callback) {
+    return glfw_dbus_monitor_session_state(callback);
 }
 
 GLFWAPI int

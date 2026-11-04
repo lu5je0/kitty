@@ -8,7 +8,7 @@ import tempfile
 
 from kitty.constants import kitty_exe
 from kitty.fast_data_types import Color, test_cursor_blink_easing_function
-from kitty.options.utils import DELETE_ENV_VAR, EasingFunction, to_color
+from kitty.options.utils import DELETE_ENV_VAR, EasingFunction, build_action_aliases, to_color
 from kitty.utils import log_error, shlex_split
 
 from .base import BaseTest
@@ -126,6 +126,15 @@ class TestConfParsing(BaseTest):
                 actual = window.screen.color_profile.as_dict()
                 self.ae(actual.get('transparent_background_colors', ()), expected)
                 self.ae(actual['foreground'], 0xFF0000)
+
+        # colors that do not mention transparent_background_colors must leave existing ones unchanged
+        window = Window.__new__(Window)
+        window.screen = self.create_screen()
+        apply_colors(window, ('transparent_background_colors=#ffffff@0.5',))
+        apply_colors(window, ('foreground=red',))
+        self.ae(window.screen.color_profile.as_dict().get('transparent_background_colors', ()), ((Color(255, 255, 255), 0.5),))
+        apply_colors(window, ('transparent_background_colors=',))
+        self.ae(window.screen.color_profile.as_dict().get('transparent_background_colors', ()), ())
 
 
 def cli_parsing(self):
@@ -375,6 +384,10 @@ def conf_parsing(self):
     self.ae(opts.font_size, 11.37)
     radius_opts = p('window_border_radius 7px')
     self.ae(radius_opts.window_border_radius, (7.0, 'px'))
+    self.ae(defaults.hyperlink_target_position, 'top')
+    for pos in ('top', 'bottom', 'below', 'tooltip'):
+        self.ae(p(f'hyperlink_target_position {pos}').hyperlink_target_position, pos)
+    self.ae(p('hyperlink_target_position xxx', bad_line_num=1).hyperlink_target_position, 'top')
     radius_opts = p('window_border_radius -2')
     self.ae(radius_opts.window_border_radius, (0.0, 'pt'))
     self.ae(opts.mouse_hide_wait[0], 0 if is_macos else 3)
@@ -403,6 +416,15 @@ def conf_parsing(self):
     self.ae(len(opts.keyboard_modes[''].keymap), 1)
     opts = p('clear_all_mouse_actions y', 'mouse_map left click ungrabbed mouse_click_url_or_select')
     self.ae(len(opts.mousemap), 1)
+    opts = p(
+        'clear_all_mouse_actions y',
+        'mouse_map ctrl+wheel_up press ungrabbed,grabbed change_font_size all +1',
+        'mouse_map shift+wheel_right press ungrabbed next_tab',
+    )
+    self.ae(
+        {k.human_repr() for k in opts.mousemap},
+        {'ctrl+wheel_up press ungrabbed', 'ctrl+wheel_up press grabbed', 'shift+wheel_right press ungrabbed'},
+    )
     opts = p('strip_trailing_spaces always')
     self.ae(opts.strip_trailing_spaces, 'always')
     self.assertFalse(bad_lines)
@@ -470,6 +492,11 @@ def conf_parsing(self):
 
     opts = p('clear_all_shortcuts y', 'action_alias ss kitten "space 1"', 'map f1 ss "space 2"')
     self.ae(ac().args, ('space 1', 'space 2'))
+
+    am = build_action_aliases({'la': 'launch --moo'})
+    self.ae(am.resolve_aliases('la XXX')[0].args, ('--moo', 'XXX'))
+    am.update(build_action_aliases({'la': 'launch --baa'}))
+    self.ae(am.resolve_aliases('la XXX')[0].args, ('--baa', 'XXX'))
 
     opts = p('kitty_mod alt')
     self.ae(opts.kitty_mod, to_modifiers('alt'))

@@ -121,9 +121,11 @@ typedef struct _GLFWWaylandBufferPair {
     struct {
         uint8_t *a, *b, *front, *back;
     } data;
+    // The back buffer could not be rendered into as it was busy
     bool has_pending_update;
     size_t size_in_bytes, width, height, viewport_width, viewport_height, stride;
-    bool a_needs_to_be_destroyed, b_needs_to_be_destroyed;
+    // Busy means attached to a surface and not yet released by the compositor
+    bool a_busy, b_busy;
 } _GLFWWaylandBufferPair;
 
 typedef struct _GLFWWaylandCSDSurface {
@@ -241,7 +243,8 @@ typedef struct _GLFWwindowWayland {
     } pointerLock;
 
     struct {
-        bool serverSide, buffer_destroyed, titlebar_needs_update, dragging, titlebar_hidden;
+        int pressed_button; // a GLFWTitlebarButton
+        bool serverSide, titlebar_needs_update, dragging, titlebar_hidden;
         _GLFWCSDSurface focus;
 
         _GLFWWaylandCSDSurface titlebar, shadow_left, shadow_right, shadow_top, shadow_bottom, shadow_upper_left, shadow_upper_right, shadow_lower_left,
@@ -331,6 +334,14 @@ typedef struct _GLFWWaylandDataOffer {
     size_t dd_capacity, dd_count;
 } _GLFWWaylandDataOffer;
 
+typedef struct _GLFWWaylandTouchPoint {
+    int32_t id;
+    GLFWid window_id;
+    GLFWTouchPointState state;
+    bool pressed_in_frame;
+    double x, y;
+} _GLFWWaylandTouchPoint;
+
 // Wayland-specific global data
 //
 typedef struct _GLFWlibraryWayland {
@@ -342,6 +353,17 @@ typedef struct _GLFWlibraryWayland {
     struct wl_seat *seat;
     struct wl_pointer *pointer;
     struct wl_keyboard *keyboard;
+    struct wl_touch *touch;
+    // The touch points that are down, each tied to the window it landed on.
+    // Changes collect here and are reported at the wl_touch frame event.
+    // pressed_in_frame marks a point the application has not heard of yet
+    struct {
+        _GLFWWaylandTouchPoint points[16];
+        size_t count;
+        // The time of the latest wl_touch event, in milliseconds of the compositor clock
+        uint32_t last_event_time;
+        bool has_event_time;
+    } touch_state;
     struct wl_data_device_manager *dataDeviceManager;
     struct wl_data_device *dataDevice;
     struct xdg_wm_base *wmBase;
@@ -519,6 +541,7 @@ void _glfwAddOutputWayland(uint32_t name, uint32_t version);
 void _glfwCreateXdgOutputWayland(_GLFWmonitor *monitor);
 void _glfwWaylandBeforeBufferSwap(_GLFWwindow *window);
 void _glfwWaylandAfterBufferSwap(_GLFWwindow *window);
+void _glfwWaylandSurfaceOutputsChanged(_GLFWwindow *window);
 void _glfwSetupWaylandDataDevice(void);
 void _glfwSetupWaylandPrimarySelectionDevice(void);
 double _glfwWaylandWindowScale(_GLFWwindow *);

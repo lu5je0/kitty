@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Container, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, fields
-from functools import lru_cache
+from math import isfinite
 from typing import (
     Any,
     Generic,
@@ -47,6 +47,7 @@ from kitty.utils import expandvars, log_error, resolve_abs_or_config_path, shlex
 
 KeyMap = dict[SingleKey, list['KeyDefinition']]
 MouseMap = dict[MouseEvent, str]
+URLMappings = dict[bool, int]
 KeySequence = tuple[SingleKey, ...]
 MINIMUM_FONT_SIZE = 4
 # Zooming is limited to a multiple of the configured font size, or to this
@@ -80,6 +81,13 @@ for x in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
     character_key_name_aliases_with_ascii_lowercase[x] = x.lower()
 sequence_sep = '>'
 mouse_button_map = {'left': 'b1', 'middle': 'b3', 'right': 'b2'}
+mouse_wheel_map = {
+    'wheel_up': defines.MOUSE_WHEEL_UP,
+    'wheel_down': defines.MOUSE_WHEEL_DOWN,
+    'wheel_left': defines.MOUSE_WHEEL_LEFT,
+    'wheel_right': defines.MOUSE_WHEEL_RIGHT,
+}
+mouse_wheel_buttons = frozenset(mouse_wheel_map.values())
 mouse_trigger_count_map = {'doubleclick': -3, 'click': -2, 'release': -1, 'press': 1, 'doublepress': 2, 'triplepress': 3}
 FuncArgsType = tuple[str, Sequence[Any]]
 func_with_args = KeyFuncWrapper[FuncArgsType]()
@@ -187,6 +195,8 @@ def goto_tab_parse(func: str, rest: str) -> FuncArgsType:
 
 @func_with_args('detach_window')
 def detach_window_parse(func: str, rest: str) -> FuncArgsType:
+    if rest.startswith('-'):
+        return shlex_parse(func, rest)
     if rest not in ('new', 'new-tab', 'new-tab-left', 'new-tab-right', 'ask', 'tab-prev', 'tab-left', 'tab-right'):
         log_error(f'Ignoring invalid detach_window argument: {rest}')
         rest = 'new'
@@ -251,12 +261,18 @@ def parse_change_font_size(func: str, rest: str) -> tuple[str, tuple[bool, str |
         log_error(f'Invalid change_font_size specification: {rest}, treating it as default')
         return func, (True, None, 0)
     c_all = vals[0].lower() == 'all'
+    sign, amt = parse_font_size_change(vals[1])
+    return func, (c_all, sign, amt)
+
+
+def parse_font_size_change(spec: str) -> tuple[str | None, float]:
     sign: str | None = None
-    amt = vals[1]
-    if amt[0] in '+-*/':
-        sign = amt[0]
-        amt = amt[1:]
-    return func, (c_all, sign, float(amt.strip()))
+    if spec and spec[0] in '+-*/':
+        sign, spec = spec[0], spec[1:]
+    amt = float(spec.strip())
+    if not isfinite(amt):
+        raise ValueError(f'{spec} is not a finite number')
+    return sign, amt
 
 
 @func_with_args('clear_terminal')
@@ -272,6 +288,29 @@ def clear_terminal(func: str, rest: str) -> FuncArgsType:
             action = 'reset'
         args = [action, vals[1].lower() == 'active']
     return func, args
+
+
+USER_ANIMATION_EVENT_PREFIX = 'user:'
+user_animation_event_name_pat = re.compile(r'[a-zA-Z0-9_.-]+')
+
+
+def is_valid_user_animation_event_name(name: str) -> bool:
+    "Whether name, without the user: prefix, is valid as the name of a custom shader user event"
+    return len(name) <= defines.MAX_SHADER_ANIM_USER_EVENT_NAME_LEN and user_animation_event_name_pat.fullmatch(name) is not None
+
+
+@func_with_args('shader_event')
+def shader_event(func: str, rest: str) -> FuncArgsType:
+    vals = rest.split()
+    if not vals or len(vals) > 2:
+        raise ValueError(f'shader_event needs an event name and optionally one of active or all, not: {rest}')
+    name = vals[0].removeprefix(USER_ANIMATION_EVENT_PREFIX)
+    if not is_valid_user_animation_event_name(name):
+        raise ValueError(f'{name!r} is not a valid custom shader user event name')
+    scope = vals[1].lower() if len(vals) > 1 else 'active'
+    if scope not in ('active', 'all'):
+        raise ValueError(f'{scope} is not valid for shader_event, must be one of active or all')
+    return func, [name, scope]
 
 
 @func_with_args('copy_to_buffer')
@@ -1278,16 +1317,23 @@ class ActionAlias(NamedTuple):
 class AliasMap:
     def __init__(self) -> None:
         self.aliases: dict[str, list[ActionAlias]] = {}
+        self.resolved: dict[tuple[str, MapType], tuple[KeyAction, ...]] = {}
 
     def append(self, name: str, aa: ActionAlias) -> None:
         self.aliases.setdefault(name, []).append(aa)
+        self.resolved.clear()
 
     def update(self, aa: 'AliasMap') -> None:
         self.aliases.update(aa.aliases)
+        self.resolved.clear()
 
-    @lru_cache(maxsize=256)
     def resolve_aliases(self, definition: str, map_type: MapType = MapType.MAP) -> tuple[KeyAction, ...]:
-        return tuple(resolve_aliases_and_parse_actions(definition, self.aliases, map_type))
+        key = definition, map_type
+        if (ans := self.resolved.get(key)) is None:
+            if len(self.resolved) >= 256:
+                self.resolved.clear()
+            ans = self.resolved[key] = tuple(resolve_aliases_and_parse_actions(definition, self.aliases, map_type))
+        return ans
 
 
 def build_action_aliases(raw: dict[str, str], first_arg_replacement: str = '') -> AliasMap:
@@ -1621,8 +1667,11 @@ def parse_mouse_map(val: str) -> Iterable[MouseMapping]:
         obutton = parts[0].lower()
         mods = 0
     try:
-        b = mouse_button_map.get(obutton, obutton)[1:]
-        button = getattr(defines, f'GLFW_MOUSE_BUTTON_{b}')
+        if obutton in mouse_wheel_map:
+            button = mouse_wheel_map[obutton]
+        else:
+            b = mouse_button_map.get(obutton, obutton)[1:]
+            button = getattr(defines, f'GLFW_MOUSE_BUTTON_{b}')
     except Exception:
         log_error(f'Mouse button: {xbutton} not recognized, ignoring')
         return
@@ -1630,6 +1679,9 @@ def parse_mouse_map(val: str) -> Iterable[MouseMapping]:
         count = mouse_trigger_count_map[event.lower()]
     except KeyError:
         log_error(f'Mouse event type: {event} not recognized, ignoring')
+        return
+    if obutton in mouse_wheel_map and count != 1:
+        log_error(f'Mouse event type for {obutton} must be press, ignoring: {val}')
         return
     specified_modes = frozenset(modes.lower().split(','))
     if specified_modes - {'grabbed', 'ungrabbed'}:

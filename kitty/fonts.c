@@ -315,10 +315,23 @@ font_group_for(double font_sz_in_pts, double logical_dpi_x, double logical_dpi_y
 
 // Sprites {{{
 
+static void sprite_tracker_set_layout(GPUSpriteTracker *sprite_tracker, unsigned int cell_width, unsigned int cell_height);
+
 void
 sprite_tracker_set_limits(size_t max_texture_size_, size_t max_array_len_) {
     max_texture_size = max_texture_size_;
     max_array_len = MIN(0xfffu, max_array_len_);
+    // Font groups are created before there is an OpenGL context, so they size
+    // their sprite layout using the conservative defaults above. Redo the
+    // layout now that the real limits are known. Only safe while no sprite has
+    // been allocated yet, since changing xnum/ynum changes what texture
+    // position an already handed out sprite index maps to.
+    for (size_t i = 0; i < num_font_groups; i++) {
+        FontGroup *fg = font_groups + i;
+        GPUSpriteTracker *st = &fg->sprite_tracker;
+        if (!st->x && !st->y && !st->z && st->ynum <= 1 && fg->fcm.cell_width && fg->fcm.cell_height)
+            sprite_tracker_set_layout(st, fg->fcm.cell_width, fg->fcm.cell_height);
+    }
 }
 
 static bool
@@ -327,7 +340,10 @@ do_increment(FontGroup *fg) {
     if (fg->sprite_tracker.x >= fg->sprite_tracker.xnum) {
         fg->sprite_tracker.x = 0;
         fg->sprite_tracker.y++;
-        fg->sprite_tracker.ynum = MIN(MAX(fg->sprite_tracker.ynum, fg->sprite_tracker.y + 1), fg->sprite_tracker.max_y);
+        if (fg->sprite_tracker.y + 1 > fg->sprite_tracker.ynum) {
+            // texture reallocation copies all sprites
+            fg->sprite_tracker.ynum = MIN(fg->sprite_tracker.max_y, MAX(fg->sprite_tracker.y + 1, fg->sprite_tracker.ynum * 2));
+        }
         if (fg->sprite_tracker.y >= fg->sprite_tracker.max_y) {
             fg->sprite_tracker.y = 0;
             fg->sprite_tracker.z++;
@@ -371,7 +387,7 @@ sprite_tracker_current_layout(FONTS_DATA_HANDLE data, unsigned int *x, unsigned 
 static void
 sprite_tracker_set_layout(GPUSpriteTracker *sprite_tracker, unsigned int cell_width, unsigned int cell_height) {
     sprite_tracker->xnum = MIN(MAX(1u, max_texture_size / cell_width), (size_t)UINT16_MAX);
-    sprite_tracker->max_y = MIN(MAX(1u, max_texture_size / cell_height), (size_t)UINT16_MAX);
+    sprite_tracker->max_y = MIN(MAX(1u, max_texture_size / (cell_height + 1)), (size_t)UINT16_MAX);
     sprite_tracker->ynum = 1;
     sprite_tracker->x = 0;
     sprite_tracker->y = 0;
@@ -557,6 +573,9 @@ init_font(Font *f, PyObject *face, bool bold, bool italic, bool emoji_presentati
 static void
 free_font_groups(void) {
     if (font_groups) {
+        // Clear dangling pointers into font_groups, otherwise the next call to
+        // save_window_font_groups() would read freed memory
+        for (size_t o = 0; o < global_state.num_os_windows; o++) global_state.os_windows[o].fonts_data = NULL;
         for (size_t i = 0; i < num_font_groups; i++) del_font_group(font_groups + i);
         free(font_groups);
         font_groups = NULL;
@@ -758,11 +777,41 @@ chars_as_utf8(const ListOfChars *lc, char *buf, size_t bufsz, char_type zero_cha
     return n;
 }
 
+static bool
+is_nerd_font_codepoint(char_type ch) {
+    // The Private Use Area ranges of the glyph sets in Nerd Fonts
+    switch (ch) {
+        START_ALLOW_CASE_RANGE
+        case 0xe000 ... 0xe00a:   // Pomicons
+        case 0xe0a0 ... 0xe0d7:   // Powerline and Powerline Extra
+        case 0xe200 ... 0xe2a9:   // Font Awesome Extension
+        case 0xe300 ... 0xe3e3:   // Weather
+        case 0xe5fa ... 0xe6b7:   // Seti-UI and Custom
+        case 0xe700 ... 0xe8ef:   // Devicons
+        case 0xea60 ... 0xec1e:   // Codicons
+        case 0xed00 ... 0xf2ff:   // Font Awesome
+        case 0xf300 ... 0xf381:   // Font Logos
+        case 0xf400 ... 0xf533:   // Octicons
+        case 0xf0001 ... 0xf1af0: // Material Design
+            return true;
+            END_ALLOW_CASE_RANGE
+    }
+    return false;
+}
+
 static ssize_t
 fallback_font(FontGroup *fg, const CPUCell *cpu_cell, const GPUCell *gpu_cell, const ListOfChars *lc) {
     bool bold = gpu_cell->attrs.bold;
     bool italic = gpu_cell->attrs.italic;
     bool emoji_presentation = has_emoji_presentation(cpu_cell, lc);
+    // Nerd Font icons are private use codepoints, whose glyph depends on the
+    // font, not on the style. Looking for a bold or italic font covering one
+    // tends to find an unrelated text font that happens to cover it, for
+    // example Liberation Serif Italic for the check mark U+f00c. So ignore the
+    // style, which also renders such icons the same way in every style. Other
+    // private use codepoints are left alone, as they may be used by fonts
+    // that do have styled variants.
+    if ((bold || italic) && is_nerd_font_codepoint(lc->chars[0])) bold = italic = false;
     char style = emoji_presentation ? 'a' : 'A';
     if (bold) style += italic ? 3 : 2;
     else style += italic ? 1 : 0;
@@ -1159,6 +1208,8 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
         return;
     }
     FontCellMetrics unscaled_metrics = fg->fcm;
+    // must be calculated before apply_scale_to_font_group() as it changes fg->font_sz_in_pts
+    const double line_scale = line_thickness_scale_for_font_size((FONTS_DATA_HANDLE)fg);
     float scale = apply_scale_to_font_group(fg, &rf);
     ensure_canvas_can_fit(fg, num_glyphs + 1, rf.scale);
     FontCellMetrics scaled_metrics = fg->fcm;
@@ -1177,7 +1228,7 @@ render_box_cell(FontGroup *fg, RunFont rf, CPUCell *cpu_cell, GPUCell *gpu_cell,
     for (unsigned i = 0, cnum = 0; i < num_glyphs; i++) {
         unsigned int ch = global_glyph_render_scratch.lc->chars[cnum++];
         while (!ch) ch = global_glyph_render_scratch.lc->chars[cnum++];
-        render_box_char(ch, fg->canvas.alpha_mask, src.right, src.bottom, fg->logical_dpi_x, fg->logical_dpi_y, scale);
+        render_box_char(ch, fg->canvas.alpha_mask, src.right, src.bottom, fg->logical_dpi_x, fg->logical_dpi_y, scale * line_scale);
         dest.left = i * scaled_metrics.cell_width + right_shift;
         dest.right = dest.left + scaled_metrics.cell_width;
         render_alpha_mask(fg->canvas.alpha_mask, fg->canvas.buf, &src, &dest, src.right, mask_stride, 0xffffff);
@@ -2383,9 +2434,10 @@ send_prerendered_sprites(FontGroup *fg) {
     // BEAM_IDX in shader.c and STRIKE_SPRITE_INDEX in
     // shaders.py and MISSING_GLYPH in font.c and dec_idx above
     do_one(add_missing_glyph(alpha_mask, fg->fcm));
-    do_one(add_beam_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x));
-    do_one(add_underline_cursor(alpha_mask, fg->fcm, fg->logical_dpi_y));
-    do_one(add_hollow_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x, fg->logical_dpi_y));
+    const double line_scale = line_thickness_scale_for_font_size((FONTS_DATA_HANDLE)fg);
+    do_one(add_beam_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x, line_scale));
+    do_one(add_underline_cursor(alpha_mask, fg->fcm, fg->logical_dpi_y, line_scale));
+    do_one(add_hollow_cursor(alpha_mask, fg->fcm, fg->logical_dpi_x, fg->logical_dpi_y, line_scale));
     RunFont rf = {.scale = 1};
     Region rg = {.bottom = fg->fcm.cell_height, .right = fg->fcm.cell_width};
     sprite_index actual_dec_idx = index_for_decorations(fg, rf, rg, rg, fg->fcm).start_idx;
@@ -2532,6 +2584,15 @@ test_sprite_position_increment(PyObject UNUSED *self, PyObject *args UNUSED) {
 }
 
 static PyObject *
+test_sprite_tracker_ynum(PyObject UNUSED *self, PyObject *args UNUSED) {
+    if (!num_font_groups) {
+        PyErr_SetString(PyExc_RuntimeError, "must create font group first");
+        return NULL;
+    }
+    return PyLong_FromUnsignedLong(font_groups->sprite_tracker.ynum);
+}
+
+static PyObject *
 set_send_sprite_to_gpu(PyObject UNUSED *self, PyObject *func) {
     Py_CLEAR(python_send_to_gpu_impl);
     if (func != Py_None) {
@@ -2578,8 +2639,8 @@ render_decoration(PyObject *self UNUSED, PyObject *args) {
     PyObject *ans = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)fcm.cell_width * fcm.cell_height);
     if (!ans) return NULL;
     memset(PyBytes_AS_STRING(ans), 0, PyBytes_GET_SIZE(ans));
-#define u(x) \
-    if (strcmp(which, #x) == 0) add_##x##_underline((uint8_t *)PyBytes_AS_STRING(ans), fcm)
+#define u(x) else if (strcmp(which, #x) == 0) add_##x##_underline((uint8_t *)PyBytes_AS_STRING(ans), fcm)
+    if (0) {}
     u(curl);
     u(dashed);
     u(dotted);
@@ -2587,9 +2648,9 @@ render_decoration(PyObject *self UNUSED, PyObject *args) {
     u(straight);
     else if (strcmp(which, "strikethrough") == 0) add_strikethrough((uint8_t *)PyBytes_AS_STRING(ans), fcm);
     else if (strcmp(which, "missing") == 0) add_missing_glyph((uint8_t *)PyBytes_AS_STRING(ans), fcm);
-    else if (strcmp(which, "beam_cursor") == 0) add_beam_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi);
-    else if (strcmp(which, "underline_cursor") == 0) add_underline_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi);
-    else if (strcmp(which, "hollow_cursor") == 0) add_hollow_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi, dpi); else {
+    else if (strcmp(which, "beam_cursor") == 0) add_beam_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi, 1.0);
+    else if (strcmp(which, "underline_cursor") == 0) add_underline_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi, 1.0);
+    else if (strcmp(which, "hollow_cursor") == 0) add_hollow_cursor((uint8_t *)PyBytes_AS_STRING(ans), fcm, dpi, dpi, 1.0); else {
         Py_CLEAR(ans);
         PyErr_Format(PyExc_KeyError, "Unknown decoration type: %s", which);
     }
@@ -2735,7 +2796,7 @@ parse_font_feature(const char *spec) {
     ParsedFontFeature *self = (ParsedFontFeature *)ParsedFontFeature_Type.tp_alloc(&ParsedFontFeature_Type, 0);
     if (self != NULL) {
         if (!hb_feature_from_string(spec, -1, &self->feature)) {
-            PyErr_Format(PyExc_ValueError, "%s is not a valid font feature", self);
+            PyErr_Format(PyExc_ValueError, "%s is not a valid font feature", spec);
             Py_CLEAR(self);
         }
     }
@@ -2765,7 +2826,7 @@ parsed_font_feature_repr(PyObject *self_) {
 
 static PyObject *
 parsed_font_feature_cmp(PyObject *self, PyObject *other, int op) {
-    if (op != Py_EQ && op != Py_NE) return Py_NotImplemented;
+    if (op != Py_EQ && op != Py_NE) Py_RETURN_NOTIMPLEMENTED;
     if (!PyObject_TypeCheck(other, &ParsedFontFeature_Type)) {
         if (op == Py_EQ) Py_RETURN_FALSE;
         Py_RETURN_TRUE;
@@ -2854,6 +2915,7 @@ static PyMethodDef module_methods[] = {
     METHODB(create_test_font_group, METH_VARARGS),
     METHODB(sprite_map_set_layout, METH_VARARGS),
     METHODB(test_sprite_position_increment, METH_NOARGS),
+    METHODB(test_sprite_tracker_ynum, METH_NOARGS),
     METHODB(concat_cells, METH_VARARGS),
     METHODB(render_decoration, METH_VARARGS),
     METHODB(set_send_sprite_to_gpu, METH_O),

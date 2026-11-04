@@ -31,6 +31,8 @@
 #include "internal.h"
 #include "backend_utils.h"
 #include "linux_notify.h"
+#include "linux_session_monitor.h"
+#include "linux_desktop_settings.h"
 #include "wl_client_side_decorations.h"
 #include "wl_titlebar_tabs.h"
 #include "../kitty/monotonic.h"
@@ -568,6 +570,22 @@ static const struct zxdg_toplevel_decoration_v1_listener xdgDecorationListener =
     xdgDecorationHandleConfigure,
 };
 
+void
+_glfwWaylandSurfaceOutputsChanged(_GLFWwindow *window) {
+    // A pending frame callback may never be answered when the output the
+    // surface was on goes away, see https://github.com/kovidgoyal/kitty/issues/10329
+    // so treat output changes as a frame event, the client will request a new
+    // frame callback after it next renders. This must not be done on a timer
+    // since compositors legitimately withhold frame callbacks for occluded
+    // windows and destroying the proxy does not cancel the callback in the
+    // compositor, so repeated requests accumulate till the compositor
+    // disconnects us. See https://github.com/kovidgoyal/kitty/issues/10597
+    if (!window->wl.frameCallbackData.current_wl_callback) return;
+    wl_callback_destroy(window->wl.frameCallbackData.current_wl_callback);
+    window->wl.frameCallbackData.current_wl_callback = NULL;
+    if (window->wl.frameCallbackData.callback) window->wl.frameCallbackData.callback(window->wl.frameCallbackData.id);
+}
+
 static void
 surfaceHandleEnter(void *data, struct wl_surface *surface UNUSED, struct wl_output *output) {
     _GLFWwindow *window = data;
@@ -587,6 +605,7 @@ surfaceHandleEnter(void *data, struct wl_surface *surface UNUSED, struct wl_outp
     }
 
     window->wl.monitors[window->wl.monitorsCount++] = monitor;
+    _glfwWaylandSurfaceOutputsChanged(window);
 
     if (checkScaleChange(window)) {
         debug("Scale changed to %.3f for window %llu in surfaceHandleEnter\n", _glfwWaylandWindowScale(window), window->id);
@@ -608,6 +627,7 @@ surfaceHandleLeave(void *data, struct wl_surface *surface UNUSED, struct wl_outp
     for (int i = window->wl.monitorsCount - 1; i >= 0; i--) {
         if (window->wl.monitors[i] == monitor) { remove_i_from_array(window->wl.monitors, i, window->wl.monitorsCount); }
     }
+    _glfwWaylandSurfaceOutputsChanged(window);
 
     if (checkScaleChange(window)) {
         debug("Scale changed to %.3f for window %llu in surfaceHandleLeave\n", _glfwWaylandWindowScale(window), window->id);
@@ -948,14 +968,14 @@ create_single_color_buffer(int width, int height, pixel color) {
         return NULL;
     }
     uint32_t *shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (color.value)
-        for (size_t i = 0; i < size / 4; i++) shm_data[i] = color.value;
-    else memset(shm_data, 0, size);
-    if (!shm_data) {
+    if (shm_data == MAP_FAILED) {
         close(fd);
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: failed to mmap anonymous file");
         return NULL;
     }
+    if (color.value)
+        for (size_t i = 0; i < size / 4; i++) shm_data[i] = color.value;
+    else memset(shm_data, 0, size);
     struct wl_shm_pool *pool = wl_shm_create_pool(_glfw.wl.shm, fd, size);
     if (!pool) {
         close(fd);
@@ -1277,6 +1297,22 @@ create_layer_shell_surface(_GLFWwindow *window) {
     return true;
 }
 
+static void
+set_toplevel_properties(_GLFWwindow *window) {
+    // These are reset by the compositor whenever the toplevel is unmapped, so
+    // they must be re-sent before every map, not just the first one.
+    if (window->wl.appId[0]) xdg_toplevel_set_app_id(window->wl.xdg.toplevel, window->wl.appId);
+    if (window->wl.windowTag[0] && _glfw.wl.xdg_toplevel_tag_manager_v1)
+        xdg_toplevel_tag_manager_v1_set_toplevel_tag(_glfw.wl.xdg_toplevel_tag_manager_v1, window->wl.xdg.toplevel, window->wl.windowTag);
+
+    if (window->wl.title) xdg_toplevel_set_title(window->wl.xdg.toplevel, window->wl.title);
+
+    if (window->minwidth != GLFW_DONT_CARE && window->minheight != GLFW_DONT_CARE)
+        xdg_toplevel_set_min_size(window->wl.xdg.toplevel, window->minwidth, window->minheight);
+    if (window->maxwidth != GLFW_DONT_CARE && window->maxheight != GLFW_DONT_CARE)
+        xdg_toplevel_set_max_size(window->wl.xdg.toplevel, window->maxwidth, window->maxheight);
+}
+
 static bool
 create_window_desktop_surface(_GLFWwindow *window) {
     if (is_layer_shell(window)) return create_layer_shell_surface(window);
@@ -1309,16 +1345,7 @@ create_window_desktop_surface(_GLFWwindow *window) {
         zxdg_toplevel_decoration_v1_add_listener(window->wl.xdg.decoration, &xdgDecorationListener, window);
     }
 
-    if (window->wl.appId[0]) xdg_toplevel_set_app_id(window->wl.xdg.toplevel, window->wl.appId);
-    if (window->wl.windowTag[0] && _glfw.wl.xdg_toplevel_tag_manager_v1)
-        xdg_toplevel_tag_manager_v1_set_toplevel_tag(_glfw.wl.xdg_toplevel_tag_manager_v1, window->wl.xdg.toplevel, window->wl.windowTag);
-
-    if (window->wl.title) xdg_toplevel_set_title(window->wl.xdg.toplevel, window->wl.title);
-
-    if (window->minwidth != GLFW_DONT_CARE && window->minheight != GLFW_DONT_CARE)
-        xdg_toplevel_set_min_size(window->wl.xdg.toplevel, window->minwidth, window->minheight);
-    if (window->maxwidth != GLFW_DONT_CARE && window->maxheight != GLFW_DONT_CARE)
-        xdg_toplevel_set_max_size(window->wl.xdg.toplevel, window->maxwidth, window->maxheight);
+    set_toplevel_properties(window);
 
     if (window->monitor) {
         if (window->wl.wm_capabilities.fullscreen) xdg_toplevel_set_fullscreen(window->wl.xdg.toplevel, window->monitor->wl.output);
@@ -1364,7 +1391,7 @@ abortOnFatalError(int last_error) {
     if (!abort_called) {
         abort_called = true;
         _glfwInputError(GLFW_PLATFORM_ERROR, "Wayland: fatal display error: %s", strerror(last_error));
-        if (_glfw.callbacks.application_close) _glfw.callbacks.application_close(1);
+        if (_glfw.callbacks.application_close) _glfw.callbacks.application_close(GLFW_APPLICATION_CLOSE_FATAL_ERROR);
         else {
             _GLFWwindow *window = _glfw.windowListHead;
             while (window) {
@@ -1533,9 +1560,14 @@ int
 _glfwPlatformCreateWindow(
     _GLFWwindow *window, const _GLFWwndconfig *wndconfig, const _GLFWctxconfig *ctxconfig, const _GLFWfbconfig *fbconfig, const GLFWLayerShellConfig *lsc) {
     window->wl.layer_shell.config = lsc ? *lsc : (GLFWLayerShellConfig){0};
+    // Compositors without xdg-decoration such as mutter need client side
+    // decorations, whose titlebar height depends on desktop settings. Wait
+    // briefly for them, to avoid resizing the window right after it is mapped.
+    if (!_glfw.wl.decorationManager && wndconfig->decorated && !is_layer_shell(window)) glfw_wait_for_desktop_settings(ms_to_monotonic_t(200ll));
     csd_initialize_metrics(window);
     window->wl.transparent = fbconfig->transparent;
     strncpy(window->wl.appId, wndconfig->wl.appId, sizeof(window->wl.appId));
+    strncpy(window->wl.windowTag, wndconfig->wl.windowTag, sizeof(window->wl.windowTag));
     window->swaps_disallowed = true;
 
     if (!create_surface(window, wndconfig)) return false;
@@ -1827,6 +1859,14 @@ _glfwPlatformShowWindow(_GLFWwindow *window, bool move_to_active_screen UNUSED) 
         } else {
             // workaround for kwin layer shell bug: https://bugs.kde.org/show_bug.cgi?id=503121
             if (is_layer_shell(window)) layer_set_properties(window, false, window->wl.width, window->wl.height);
+            else if (window->wl.xdg.toplevel) {
+                // Unmapping an xdg_toplevel resets all its state, so restore it
+                set_toplevel_properties(window);
+                const WaylandWindowState states = window->wl.current.toplevel_states;
+                if (states & TOPLEVEL_STATE_FULLSCREEN) setFullscreen(window, NULL, true);
+                else if ((states & TOPLEVEL_STATE_MAXIMIZED) && window->wl.wm_capabilities.maximize) xdg_toplevel_set_maximized(window->wl.xdg.toplevel);
+                setXdgDecorations(window);
+            }
             window->wl.visible = true;
             commit_window_surface(window);
         }
@@ -2676,7 +2716,8 @@ request_drop_data(_GLFWWaylandDataOffer *offer, const char *mime) {
         return ENOMEM;
     }
     if (!offer->requested_drop_data || offer->dd_count + 1 >= offer->dd_capacity) {
-        void *p = realloc(offer->requested_drop_data, sizeof(offer->requested_drop_data[0]) * (offer->dd_capacity + 8));
+        const size_t newcap = offer->dd_capacity + 64;
+        void *p = realloc(offer->requested_drop_data, sizeof(offer->requested_drop_data[0]) * newcap);
         if (!p) {
             safe_close(pipefd[0]);
             removeWatch(&_glfw.wl.eventLoopData, watch_id);
@@ -2684,7 +2725,7 @@ request_drop_data(_GLFWWaylandDataOffer *offer, const char *mime) {
             return ENOMEM;
         }
         offer->requested_drop_data = p;
-        offer->dd_capacity += 64;
+        offer->dd_capacity = newcap;
     }
     offer->requested_drop_data[offer->dd_count].mime = mt;
     offer->requested_drop_data[offer->dd_count].watch_id = watch_id;
@@ -2992,6 +3033,15 @@ frame_handle_redraw(void *data, struct wl_callback *callback, uint32_t time UNUS
 void
 _glfwPlatformChangeCursorTheme(void) {
     glfw_wlc_destroy();
+    // All standard cursors point into the now destroyed themes, so invalidate
+    // them, they will be lazily re-loaded when next used.
+    for (_GLFWcursor *c = _glfw.cursorListHead; c; c = c->next) {
+        if (c->wl.scale >= 0) {
+            c->wl.cursor = NULL;
+            c->wl.scale = 0;
+            c->wl.currentImage = 0;
+        }
+    }
     _GLFWwindow *w = _glfw.windowListHead;
     while (w) {
         setCursorImage(w, true);
@@ -3092,6 +3142,11 @@ glfwDBusSetUserNotificationHandler(GLFWDBusnotificationactivatedfun handler) {
 }
 
 GLFWAPI bool
+glfwDBusMonitorSessionState(GLFWDBussessionstatefun callback) {
+    return glfw_dbus_monitor_session_state(callback);
+}
+
+GLFWAPI bool
 glfwWaylandSetTitlebarColor(GLFWwindow *handle, uint32_t color, bool use_system_color) {
     _GLFWwindow *window = (_GLFWwindow *)handle;
     if (!window->wl.decorations.serverSide) {
@@ -3105,6 +3160,38 @@ GLFWAPI void
 glfwWaylandRedrawCSDWindowTitle(GLFWwindow *handle) {
     _GLFWwindow *window = (_GLFWwindow *)handle;
     if (csd_change_title(window)) commit_window_surface_if_safe(window);
+}
+
+static void
+update_titlebar_height(_GLFWwindow *window) {
+    const unsigned old_height = window->wl.decorations.metrics.visible_titlebar_height;
+    csd_initialize_metrics(window);
+    if (old_height == window->wl.decorations.metrics.visible_titlebar_height) return;
+    if (!csd_should_window_be_decorated(window) || window->wl.decorations.titlebar_hidden) return;
+    // Floating windows keep their content size and grow/shrink, docked windows
+    // must keep the size the compositor gave them, so the content changes size.
+    int32_t width = window->wl.width;
+    int32_t height = window->wl.height + (int32_t)window->wl.decorations.metrics.visible_titlebar_height;
+    if (window->wl.current.toplevel_states & TOPLEVEL_STATE_DOCKED) height = window->wl.height + (int32_t)old_height;
+    csd_set_window_geometry(window, &width, &height);
+    height = MAX(1, height);
+    if (height != window->wl.height) {
+        _glfwInputWindowSize(window, width, height);
+        window->wl.height = height;
+        resizeFramebuffer(window);
+        _glfwInputWindowDamage(window);
+    }
+    inform_compositor_of_window_geometry(window, "TitlebarSettings");
+}
+
+void
+_glfwPlatformTitlebarSettingsChanged(void) {
+    for (_GLFWwindow *w = _glfw.windowListHead; w; w = w->next) {
+        w->wl.decorations.pressed_button = TITLEBAR_BUTTON_NONE;
+        w->wl.decorations.close.hovered = w->wl.decorations.maximize.hovered = w->wl.decorations.minimize.hovered = false;
+        update_titlebar_height(w);
+        if (csd_change_title(w)) commit_window_surface_if_safe(w);
+    }
 }
 
 GLFWAPI void
@@ -3370,11 +3457,11 @@ send_drag_data(_GLFWwindow *window, size_t i) {
                 dr.pending_data = NULL;
                 dr.sz = 0;
                 dr.offset = 0;
-                finish_drag_write(i);
+                if (has_preset_data) finish_drag_write(i);
             }
         }
     } else if (has_preset_data) {
-        do { ret = write(dr.fd, _glfw.drag.items[item_idx].optional_data, _glfw.drag.items[item_idx].data_size); } while (ret < 0 && errno == EINTR);
+        ret = write_as_much_as_possible(dr.fd, _glfw.drag.items[item_idx].optional_data, _glfw.drag.items[item_idx].data_size);
         if (ret < 0) {
             on_fail;
         } else {
@@ -3389,6 +3476,7 @@ send_drag_data(_GLFWwindow *window, size_t i) {
                     dr.pending_data = pending;
                     dr.sz = _glfw.drag.items[item_idx].data_size - ret;
                     dr.offset = 0;
+                    memcpy(pending, _glfw.drag.items[item_idx].optional_data + ret, dr.sz);
                 }
             }
         }
@@ -3418,11 +3506,7 @@ send_drag_data(_GLFWwindow *window, size_t i) {
                     }
                 }
                 _glfwInputDragSourceRequest(window, &ev);
-                if (ret < 0) {
-                    on_fail;
-                } else if ((size_t)ret >= ev.data_sz) {
-                    finish_drag_write(i);
-                }
+                if (ret < 0) { on_fail; }
             } else finish_drag_write(i);
         }
     }
@@ -3485,7 +3569,7 @@ _glfwPlatformChangeDragImage(const GLFWimage *thumbnail) {
 int
 _glfwPlatformDragDataReady(const char *mime_type, const char *data UNUSED, size_t sz UNUSED, int type UNUSED) {
     for (size_t i = 0; i < _glfw.wl.drag.count; i++) {
-        if (strcmp(dr.mime_type, mime_type) == 0) {
+        if (dr.mime_type && dr.fd > -1 && strcmp(dr.mime_type, mime_type) == 0) {
             if (!dr.watch_id) dr.watch_id = add_drag_watch(dr.fd);
         }
     }
@@ -3501,6 +3585,8 @@ drag_source_send(void *data UNUSED, struct wl_data_source *source UNUSED, const 
     cancel_drag(GLFW_DRAG_CANCELLED); \
     return
     if (!window) { abort(); }
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) { abort(); }
     mime_type = _glfw_strdup(mime_type);
     if (!mime_type) { abort(); }
     if (!_glfw.wl.drag.data_requests || _glfw.wl.drag.capacity <= _glfw.wl.drag.count + 1) {

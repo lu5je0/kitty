@@ -367,6 +367,9 @@ cocoa_out_of_sequence_render(OSWindow *window) {
             request_tick_callback();
             return;
         }
+        // Recreation creates a new context, which does not inherit per-context
+        // state such as uniform buffer binding points
+        bind_shader_globals_to_current_context();
     }
 
     bool rendered = false;
@@ -598,13 +601,26 @@ key_callback(GLFWwindow *w, GLFWkeyevent *ev) {
 #ifndef __APPLE__
     if (key_modifier != -1) update_modifier_state_on_modifier_key_event(ev, key_modifier, is_left);
 #endif
+    const int old_mods = global_state.mods_at_last_key_or_button_event;
     global_state.mods_at_last_key_or_button_event = ev->mods;
     global_state.callback_os_window->cursor_blink_zero_time = monotonic();
     global_state.callback_os_window->user_is_idle = false;
     global_state.callback_os_window->shader_anim_event_registry |= (1u << SHADER_ANIM_EVENT_USER_ACTIVITY);
-    if (is_window_ready_for_callbacks() && !ev->fake_event_on_focus_change) on_key_input(ev);
+    if (is_window_ready_for_callbacks()) {
+        update_link_hover_for_modifiers(old_mods, ev->mods);
+        if (!ev->fake_event_on_focus_change) on_key_input(ev);
+    }
     global_state.callback_os_window = NULL;
     request_tick_callback();
+}
+
+// Sets the mouse position from window co-ordinates, converting to viewport
+// pixels and then to where custom shaders actually show the content under it
+void
+set_os_window_mouse_position(OSWindow *window, double x, double y) {
+    window->mouse_x = x * window->viewport_x_ratio;
+    window->mouse_y = y * window->viewport_y_ratio;
+    map_pointer_position(window, &window->mouse_x, &window->mouse_y);
 }
 
 static void
@@ -614,16 +630,14 @@ cursor_enter_callback(GLFWwindow *w, int entered) {
     glfwGetCursorPos(w, &x, &y);
     monotonic_t now = monotonic();
     global_state.callback_os_window->last_mouse_activity_at = now;
-    double new_mouse_x = x * global_state.callback_os_window->viewport_x_ratio;
-    double new_mouse_y = y * global_state.callback_os_window->viewport_y_ratio;
+    const double old_mouse_x = global_state.callback_os_window->mouse_x, old_mouse_y = global_state.callback_os_window->mouse_y;
+    set_os_window_mouse_position(global_state.callback_os_window, x, y);
     // focus_follows_mouse should react to the mouse moving, not to a window
     // appearing under a stationary cursor (such as when returning to this
     // desktop/space). Detect genuine motion by comparing against the last
     // known cursor position so an enter caused by mouse motion still switches
     // focus, while a stationary reappearance does not.
-    bool cursor_moved = new_mouse_x != global_state.callback_os_window->mouse_x || new_mouse_y != global_state.callback_os_window->mouse_y;
-    global_state.callback_os_window->mouse_x = new_mouse_x;
-    global_state.callback_os_window->mouse_y = new_mouse_y;
+    bool cursor_moved = old_mouse_x != global_state.callback_os_window->mouse_x || old_mouse_y != global_state.callback_os_window->mouse_y;
     if (entered) {
         debug_input("Mouse cursor entered window: %llu at %fx%f\n", global_state.callback_os_window->id, x, y);
         cursor_active_callback(now);
@@ -644,8 +658,7 @@ refresh_mouse_position_for_hit_test(GLFWwindow *w, OSWindow *window) {
         // Query the current position for discrete pointer events without emitting a move event.
         double x, y;
         glfwGetCursorPos(w, &x, &y);
-        window->mouse_x = x * window->viewport_x_ratio;
-        window->mouse_y = y * window->viewport_y_ratio;
+        set_os_window_mouse_position(window, x, y);
         return true;
     }
 #else
@@ -653,6 +666,16 @@ refresh_mouse_position_for_hit_test(GLFWwindow *w, OSWindow *window) {
     (void)window;
 #endif
     return false;
+}
+
+static void
+dispatch_mouse_button(OSWindow *window, int button, int action, int mods) {
+    window->mouse_button_pressed[button] = action == GLFW_PRESS;
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        window->mouse_left_press_x = window->mouse_x;
+        window->mouse_left_press_y = window->mouse_y;
+    }
+    if (is_window_ready_for_callbacks()) mouse_event(button, mods, action);
 }
 
 static void
@@ -673,17 +696,11 @@ mouse_button_callback(GLFWwindow *w, int button, int action, int mods) {
             if (!position_was_refreshed) {
                 double x, y;
                 glfwGetCursorPos(w, &x, &y);
-                window->mouse_x = x * window->viewport_x_ratio;
-                window->mouse_y = y * window->viewport_y_ratio;
+                set_os_window_mouse_position(window, x, y);
             }
             if (is_window_ready_for_callbacks()) mouse_event(-1, mods, -1);
         }
-        global_state.callback_os_window->mouse_button_pressed[button] = action == GLFW_PRESS ? true : false;
-        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
-            window->mouse_left_press_x = window->mouse_x;
-            window->mouse_left_press_y = window->mouse_y;
-        }
-        if (is_window_ready_for_callbacks()) mouse_event(button, mods, action);
+        dispatch_mouse_button(window, button, action, mods);
     }
     request_tick_callback();
     global_state.callback_os_window = NULL;
@@ -697,8 +714,7 @@ on_mouse_position_update(double x, double y) {
     global_state.callback_os_window->cursor_blink_zero_time = now;
     global_state.callback_os_window->user_is_idle = false;
     global_state.callback_os_window->shader_anim_event_registry |= (1u << SHADER_ANIM_EVENT_USER_ACTIVITY);
-    global_state.callback_os_window->mouse_x = x * global_state.callback_os_window->viewport_x_ratio;
-    global_state.callback_os_window->mouse_y = y * global_state.callback_os_window->viewport_y_ratio;
+    set_os_window_mouse_position(global_state.callback_os_window, x, y);
     global_state.callback_os_window->has_received_cursor_pos_event = true;
     if (is_window_ready_for_callbacks()) mouse_event(-1, global_state.mods_at_last_key_or_button_event, -1);
     request_tick_callback();
@@ -722,6 +738,208 @@ scroll_callback(GLFWwindow *w, const GLFWScrollEvent *ev) {
     request_tick_callback();
     global_state.callback_os_window = NULL;
 }
+
+// Touch {{{
+// A touchscreen is turned into mouse and scroll events. Only the first finger of a
+// sequence counts, the others are ignored. A finger that stays within
+// TOUCH_TAP_SLOP is a left click where it landed, sent when it lifts. A finger that
+// moves at once scrolls, through the momentum scroller, so the content follows it
+// and coasts once it lifts, as with a touchpad. A finger held still for
+// TOUCH_SELECT_HOLD before it moves drags the left button from where it landed,
+// which selects text as a mouse drag does.
+#define TOUCH_TAP_SLOP 8.0
+#define TOUCH_SELECT_HOLD ms_to_monotonic_t(400ll)
+
+typedef enum TouchGestureState { TOUCH_IDLE, TOUCH_PENDING, TOUCH_SCROLLING, TOUCH_SELECTING, TOUCH_IGNORED } TouchGestureState;
+
+static struct {
+    TouchGestureState state;
+    id_type os_window_id;
+    int32_t point_id;
+    double start_x, start_y, last_x, last_y;
+    monotonic_t down_at;
+} touch_gesture = {0};
+
+static const char *
+touch_event_type_name(GLFWTouchEventType t) {
+    switch (t) {
+        case GLFW_TOUCH_BEGIN: return "begin";
+        case GLFW_TOUCH_UPDATE: return "update";
+        case GLFW_TOUCH_END: return "end";
+        case GLFW_TOUCH_CANCEL: return "cancel";
+    }
+    return "unknown";
+}
+
+static const char *
+touch_point_state_name(GLFWTouchPointState t) {
+    switch (t) {
+        case GLFW_TOUCH_POINT_PRESSED: return "pressed";
+        case GLFW_TOUCH_POINT_MOVED: return "moved";
+        case GLFW_TOUCH_POINT_STATIONARY: return "stationary";
+        case GLFW_TOUCH_POINT_RELEASED: return "released";
+    }
+    return "unknown";
+}
+
+// Moves the mouse position kitty uses to the finger and reports the move, without
+// showing the mouse cursor, which is not where the finger is
+static void
+touch_move_mouse(OSWindow *osw, double x, double y, int mods) {
+    const monotonic_t now = monotonic();
+    osw->last_mouse_activity_at = now;
+    osw->cursor_blink_zero_time = now;
+    osw->user_is_idle = false;
+    osw->shader_anim_event_registry |= (1u << SHADER_ANIM_EVENT_USER_ACTIVITY);
+    set_os_window_mouse_position(osw, x, y);
+    osw->has_received_cursor_pos_event = true;
+    if (is_window_ready_for_callbacks()) mouse_event(-1, mods, -1);
+}
+
+static void
+touch_press_left_button(OSWindow *osw, int action, int mods) {
+    global_state.mods_at_last_key_or_button_event = mods;
+    dispatch_mouse_button(osw, GLFW_MOUSE_BUTTON_LEFT, action, mods);
+}
+
+// The momentum scroller delivers its scroll events through scroll_callback() at
+// once, which clears global_state.callback_os_window, so it is restored afterwards
+static void
+touch_scroll(GLFWwindow *w, OSWindow *osw, double dx, double dy, bool stopped, int mods, monotonic_t timestamp) {
+    if (!glfwFeedMomentumScroller) return;
+    glfwFeedMomentumScroller(w, dx, dy, mods, stopped, timestamp);
+    global_state.callback_os_window = osw;
+}
+
+static void
+touch_gesture_reset(void) {
+    zero_at_ptr(&touch_gesture);
+}
+
+static void
+touch_gesture_cancel(OSWindow *osw, int mods) {
+    switch (touch_gesture.state) {
+        case TOUCH_SELECTING:
+            // The button is let go, so that it is not left held down
+            if (osw) touch_press_left_button(osw, GLFW_RELEASE, mods);
+            break;
+        case TOUCH_SCROLLING:
+            if (glfwCancelMomentumScroll) glfwCancelMomentumScroll();
+            break;
+        case TOUCH_IDLE:
+        case TOUCH_PENDING:
+        case TOUCH_IGNORED: break;
+    }
+    touch_gesture_reset();
+}
+
+static void
+touch_gesture_moved(GLFWwindow *w, OSWindow *osw, const GLFWTouchPoint *p, int mods, monotonic_t timestamp) {
+    switch (touch_gesture.state) {
+        case TOUCH_PENDING:
+            if (fabs(p->x - touch_gesture.start_x) <= TOUCH_TAP_SLOP && fabs(p->y - touch_gesture.start_y) <= TOUCH_TAP_SLOP) return;
+            if (timestamp - touch_gesture.down_at >= TOUCH_SELECT_HOLD) {
+                touch_gesture.state = TOUCH_SELECTING;
+                touch_move_mouse(osw, touch_gesture.start_x, touch_gesture.start_y, mods);
+                touch_press_left_button(osw, GLFW_PRESS, mods);
+                touch_move_mouse(osw, p->x, p->y, mods);
+            } else {
+                touch_gesture.state = TOUCH_SCROLLING;
+                // Scroll events go to the kitty window under the mouse position, and
+                // are reported at it to programs that track the mouse
+                touch_move_mouse(osw, touch_gesture.start_x, touch_gesture.start_y, mods);
+                touch_scroll(w, osw, p->x - touch_gesture.start_x, p->y - touch_gesture.start_y, false, mods, timestamp);
+            }
+            break;
+        case TOUCH_SELECTING: touch_move_mouse(osw, p->x, p->y, mods); break;
+        case TOUCH_SCROLLING: touch_scroll(w, osw, p->x - touch_gesture.last_x, p->y - touch_gesture.last_y, false, mods, timestamp); break;
+        case TOUCH_IDLE:
+        case TOUCH_IGNORED: break;
+    }
+    touch_gesture.last_x = p->x;
+    touch_gesture.last_y = p->y;
+}
+
+static void
+touch_gesture_released(GLFWwindow *w, OSWindow *osw, int mods, monotonic_t timestamp) {
+    switch (touch_gesture.state) {
+        case TOUCH_PENDING:
+            touch_move_mouse(osw, touch_gesture.start_x, touch_gesture.start_y, mods);
+            touch_press_left_button(osw, GLFW_PRESS, mods);
+            touch_press_left_button(osw, GLFW_RELEASE, mods);
+            break;
+        case TOUCH_SELECTING: touch_press_left_button(osw, GLFW_RELEASE, mods); break;
+        case TOUCH_SCROLLING: touch_scroll(w, osw, 0, 0, true, mods, timestamp); break;
+        case TOUCH_IDLE:
+        case TOUCH_IGNORED: break;
+    }
+    touch_gesture_reset();
+}
+
+static void
+touch_callback(GLFWwindow *w, const GLFWTouchEvent *ev) {
+    if (!set_callback_window(w)) return;
+    OSWindow *osw = global_state.callback_os_window;
+    if (OPT(debug_keyboard)) {
+        char points[1024];
+        size_t pos = 0;
+        points[0] = 0;
+        for (size_t i = 0; i < ev->num_points && pos < sizeof(points); i++) {
+            const GLFWTouchPoint *p = ev->points + i;
+            const int n = snprintf(points + pos, sizeof(points) - pos, " [%d %s %.1f,%.1f]", p->id, touch_point_state_name(p->state), p->x, p->y);
+            if (n < 0) break;
+            pos += (size_t)n;
+        }
+        timed_debug_print("\x1b[33mTouch\x1b[m %s modifiers: %s%s\n", touch_event_type_name(ev->type), format_mods(ev->keyboard_modifiers), points);
+    }
+    const int mods = ev->keyboard_modifiers;
+    // The OS window of a gesture can close before its fingers lift, and then it
+    // gets no more events
+    if (touch_gesture.state != TOUCH_IDLE && !os_window_for_id(touch_gesture.os_window_id)) touch_gesture_reset();
+    if (touch_gesture.state != TOUCH_IDLE && touch_gesture.os_window_id != osw->id) {
+        // A finger on another OS window: only the first finger of a sequence counts
+        global_state.callback_os_window = NULL;
+        return;
+    }
+    if (ev->type == GLFW_TOUCH_CANCEL) {
+        touch_gesture_cancel(osw, mods);
+        request_tick_callback();
+        global_state.callback_os_window = NULL;
+        return;
+    }
+    if (ev->type == GLFW_TOUCH_BEGIN) {
+        touch_gesture_cancel(osw, mods);
+        touch_gesture.os_window_id = osw->id;
+        if (ev->num_points == 1) {
+            const GLFWTouchPoint *p = ev->points;
+            touch_gesture.state = TOUCH_PENDING;
+            touch_gesture.point_id = p->id;
+            touch_gesture.start_x = touch_gesture.last_x = p->x;
+            touch_gesture.start_y = touch_gesture.last_y = p->y;
+            touch_gesture.down_at = ev->timestamp;
+        } else touch_gesture.state = TOUCH_IGNORED; // several fingers at once are not handled
+    }
+    for (size_t i = 0; i < ev->num_points && touch_gesture.state != TOUCH_IDLE; i++) {
+        const GLFWTouchPoint *p = ev->points + i;
+        if (p->id != touch_gesture.point_id) {
+            // A second finger before the first was recognised makes a gesture
+            // that is not handled
+            if (p->state == GLFW_TOUCH_POINT_PRESSED && touch_gesture.state == TOUCH_PENDING) touch_gesture.state = TOUCH_IGNORED;
+            continue;
+        }
+        switch (p->state) {
+            case GLFW_TOUCH_POINT_MOVED: touch_gesture_moved(w, osw, p, mods, ev->timestamp); break;
+            case GLFW_TOUCH_POINT_RELEASED: touch_gesture_released(w, osw, mods, ev->timestamp); break;
+            case GLFW_TOUCH_POINT_PRESSED:
+            case GLFW_TOUCH_POINT_STATIONARY: break;
+        }
+    }
+    // The sequence is over once every finger has lifted
+    if (ev->type == GLFW_TOUCH_END) touch_gesture_reset();
+    request_tick_callback();
+    global_state.callback_os_window = NULL;
+}
+// }}}
 
 static id_type focus_counter = 0;
 
@@ -765,13 +983,23 @@ window_focus_callback(GLFWwindow *w, int focused) {
     osw->last_mouse_activity_at = now;
     osw->cursor_blink_zero_time = now;
     if (is_window_ready_for_callbacks()) {
-        WINDOW_CALLBACK(on_focus, "O", focused ? Py_True : Py_False);
-        if (!osw || osw->id != wid) osw = os_window_for_id(wid);
-        if (osw) {
-            fork_ime_sync_wayland_inhibit(osw);  // fork-local, must run before the FOCUS event below
-            GLFWIMEUpdateEvent ev = {.type = GLFW_IME_UPDATE_FOCUS, .focused = focused};
+        GLFWIMEUpdateEvent ev = {.type = GLFW_IME_UPDATE_FOCUS, .focused = focused};
+        // On focus loss update the IME before reporting the focus change, so
+        // that any pre-edit text the IME commits reaches the child before the
+        // focus out event. Updating the IME can dispatch key events which reset
+        // callback_os_window, so look it up again.
+        if (!focused) {
             glfwUpdateIMEState(osw->handle, &ev);
-            if (focused) {
+            osw = os_window_for_id(wid);
+        }
+        if (osw) {
+            WINDOW_CALLBACK(on_focus, "O", focused ? Py_True : Py_False);
+            if (!osw || osw->id != wid) osw = os_window_for_id(wid);
+        }
+        if (osw && focused) {
+            fork_ime_sync_wayland_inhibit(osw);  // fork-local, must run before the FOCUS event below
+            glfwUpdateIMEState(osw->handle, &ev);
+            if ((osw = os_window_for_id(wid))) {
                 Tab *tab = osw->tabs + osw->active_tab;
                 Window *window = tab->windows + tab->active_window;
                 if (window->render_data.screen) update_ime_position(window, window->render_data.screen);
@@ -945,9 +1173,9 @@ drop_dest_callback(GLFWwindow *window, GLFWDropEvent *ev) {
         case GLFW_DROP_MOVE:
             global_state.drop_dest.drop_has_happened = false;
             global_state.drop_dest.os_window_id = os_window->id;
-            os_window->last_drag_event.x = (int)(ev->xpos * os_window->viewport_x_ratio);
-            os_window->last_drag_event.y = (int)(ev->ypos * os_window->viewport_y_ratio);
             on_mouse_position_update(ev->xpos, ev->ypos);
+            os_window->last_drag_event.x = (int)os_window->mouse_x;
+            os_window->last_drag_event.y = (int)os_window->mouse_y;
             // Re-evaluate which kitty window is now under the cursor after the
             // position update, so that drag enter/leave events are sent to the
             // correct kitty window when the drag crosses a kitty window boundary
@@ -1054,7 +1282,11 @@ request_drop_status_update(OSWindow *osw) {
 
 static void
 application_close_requested_callback(int flags) {
-    if (flags) {
+    if (flags & GLFW_APPLICATION_CLOSE_LOGOUT) {
+        global_state.logout_quit.requested = true;
+        global_state.logout_quit.at = monotonic();
+    }
+    if (flags & GLFW_APPLICATION_CLOSE_FATAL_ERROR) {
         global_state.quit_request = IMPERATIVE_CLOSE_REQUESTED;
         global_state.has_pending_closes = true;
         request_tick_callback();
@@ -1091,13 +1323,14 @@ drag_source_callback(GLFWwindow *window UNUSED, GLFWDragEvent *ev) {
     {                                                                                    \
         call_boss(                                                                       \
             on_drag_source_finished,                                                     \
-            "OOsiOO",                                                                    \
+            "OOsiOOO",                                                                   \
             ds.was_dropped && !global_state.drop_dest.os_window_id ? Py_True : Py_False, \
             ds.was_canceled ? Py_True : Py_False,                                        \
             ds.accepted_mime_type ? ds.accepted_mime_type : "",                          \
             ds.action,                                                                   \
             ds.drag_data ? ds.drag_data : Py_None,                                       \
-            ds.needs_toplevel_on_wayland ? Py_True : Py_False);                          \
+            ds.needs_toplevel_on_wayland ? Py_True : Py_False,                           \
+            ds.was_dropped && global_state.drop_dest.os_window_id ? Py_True : Py_False); \
         free_drag_source();                                                              \
     }
     Window *w = NULL;
@@ -1280,6 +1513,29 @@ freetype_render_ctx(bool bold) {
     return *which;
 }
 
+static FreeTypeRenderCtx csd_title_render_ctx = NULL;
+static struct {
+    char family[256];
+    bool bold, italic, initialized;
+} csd_title_render_ctx_key;
+
+static FreeTypeRenderCtx
+csd_title_render_ctx_for(const GLFWTitlebarFont *font) {
+    const char *family = font->family ? font->family : "";
+    if (csd_title_render_ctx_key.initialized && csd_title_render_ctx_key.bold == font->bold && csd_title_render_ctx_key.italic == font->italic &&
+        strcmp(csd_title_render_ctx_key.family, family) == 0)
+        return csd_title_render_ctx;
+    // Remember failures as well, so as to not retry and report them on every redraw
+    release_freetype_render_context(csd_title_render_ctx);
+    csd_title_render_ctx = create_freetype_render_context(family[0] ? family : NULL, font->bold, font->italic);
+    if (!csd_title_render_ctx && PyErr_Occurred()) PyErr_Print();
+    snprintf(csd_title_render_ctx_key.family, sizeof(csd_title_render_ctx_key.family), "%s", family);
+    csd_title_render_ctx_key.bold = font->bold;
+    csd_title_render_ctx_key.italic = font->italic;
+    csd_title_render_ctx_key.initialized = true;
+    return csd_title_render_ctx;
+}
+
 static bool
 draw_text_callback(
     GLFWwindow *window,
@@ -1293,17 +1549,19 @@ draw_text_callback(
     float y_offset,
     size_t right_margin,
     bool is_single_glyph) {
+    // Used only to render the title in Wayland client side decorations
     if (!set_callback_window(window)) return false;
-    FreeTypeRenderCtx ctx;
-    if (!(ctx = freetype_render_ctx(true))) return false;
     double xdpi, ydpi;
     get_window_dpi(window, &xdpi, &ydpi);
-    unsigned px_sz = 2 * height / 3;
-    static char title[2048];
-    if (!is_single_glyph) {
-        snprintf(title, sizeof(title), " ❭ %s", text);
-        text = title;
-    }
+    const GLFWTitlebarFont font = glfwGetTitlebarFont();
+    FreeTypeRenderCtx ctx = csd_title_render_ctx_for(&font);
+    if (!ctx && !(ctx = freetype_render_ctx(true))) return false;
+    unsigned px_sz = (unsigned)round(font.point_size * ydpi / 72. * font.text_scale);
+    px_sz = MIN(px_sz, (unsigned)(height * 3 / 4));
+    // Center the title
+    size_t text_width = freetype_text_width_for_single_line(ctx, text, px_sz);
+    size_t available = width > right_margin + (size_t)x_offset ? width - right_margin - (size_t)x_offset : 0;
+    if (text_width < available) x_offset += (float)((available - text_width) / 2.);
     bool ok = render_single_line(ctx, text, px_sz, fg, bg, output_buf, width, height, x_offset, y_offset, right_margin, is_single_glyph);
     if (!ok && PyErr_Occurred()) PyErr_Print();
     return ok;
@@ -1445,7 +1703,8 @@ set_glfw_mouse_pointer_shape_in_window(GLFWwindow *w, MouseShape type) {
 
 void
 set_mouse_cursor(MouseShape type) {
-    if (global_state.callback_os_window) {
+    // Headless mock OS windows have no native cursor.
+    if (global_state.callback_os_window && global_state.callback_os_window->handle) {
         GLFWwindow *w = (GLFWwindow *)global_state.callback_os_window->handle;
         set_glfw_mouse_pointer_shape_in_window(w, type);
     }
@@ -1755,8 +2014,17 @@ static bool
 intercept_cocoa_fullscreen(GLFWwindow *w) {
     if (!set_callback_window(w)) return false;
     if (!OPT(macos_traditional_fullscreen)) {
+        OSWindow *osw = global_state.callback_os_window;
+        const bool is_fullscreen = is_os_window_fullscreen(osw);
+        if (!is_fullscreen) {
+            // Remember the geometry from before macOS makes the window fullscreen, as do_toggle_fullscreen() does
+            glfwGetWindowSize(w, &osw->before_fullscreen.w, &osw->before_fullscreen.h);
+            glfwGetWindowPos(w, &osw->before_fullscreen.x, &osw->before_fullscreen.y);
+            osw->before_fullscreen.was_maximized = glfwGetWindowAttrib(w, GLFW_MAXIMIZED);
+            osw->before_fullscreen.is_set = true;
+        }
         // In non traditional fullscreen macOS forces the window to opaque
-        global_state.callback_os_window->background_opacity.os_forces_opaque = !is_os_window_fullscreen(global_state.callback_os_window);
+        osw->background_opacity.os_forces_opaque = !is_fullscreen;
         return false;
     }
     // macOS Split View uses Cocoa fullscreen internally, so the window
@@ -2079,12 +2347,25 @@ set_window_creation_error(bool is_panel) {
     }
 }
 
+static bool
+is_visible_on_a_monitor(int x, int y, int width, int height) {
+    int count = 0;
+    GLFWmonitor **monitors = glfwGetMonitors(&count);
+    if (count <= 0 || !monitors) return true;
+    for (int i = 0; i < count; i++) {
+        int mx, my, mw, mh;
+        glfwGetMonitorWorkarea(monitors[i], &mx, &my, &mw, &mh);
+        if (x < mx + mw && mx < x + width && y < my + mh && my < y + height) return true;
+    }
+    return false;
+}
+
 static PyObject *
 create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     int x = INT_MIN, y = INT_MIN, window_state = WINDOW_NORMAL, disallow_override_title = 0;
-    char *title, *wm_class_class, *wm_class_name;
-    PyObject *optional_window_state = NULL, *load_programs = NULL, *get_window_size, *pre_show_callback, *optional_x = NULL, *optional_y = NULL,
-             *layer_shell_config = NULL;
+    char *wm_class_class, *wm_class_name;
+    PyObject *title, *optional_window_state = NULL, *load_programs = NULL, *get_window_size, *pre_show_callback, *optional_x = NULL, *optional_y = NULL,
+                     *layer_shell_config = NULL;
     static const char *kwlist[] = {
         "get_window_size",
         "pre_show_callback",
@@ -2101,7 +2382,7 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kw,
-            "OOsss|OOOOpO",
+            "OOUss|OOOOpO",
             (char **)kwlist,
             &get_window_size,
             &pre_show_callback,
@@ -2115,6 +2396,8 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
             &disallow_override_title,
             &layer_shell_config))
         return NULL;
+    const char *title_utf8 = PyUnicode_AsUTF8(title);
+    if (!title_utf8) return NULL;
     GLFWLayerShellConfig *lsc = NULL, lsc_stack = {0};
     if (optional_window_state && optional_window_state != Py_None) {
         if (!PyLong_Check(optional_window_state)) {
@@ -2192,6 +2475,8 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     glfwWindowHintString(GLFW_X11_INSTANCE_NAME, wm_class_name);
     glfwWindowHintString(GLFW_X11_CLASS_NAME, wm_class_class);
     glfwWindowHintString(GLFW_WAYLAND_APP_ID, wm_class_class);
+    // wm_class_name defaults to wm_class_class when not specified, only set the tag when it was specified
+    glfwWindowHintString(GLFW_WAYLAND_WINDOW_TAG, strcmp(wm_class_name, wm_class_class) == 0 ? "" : wm_class_name);
 #endif
 
     if (global_state.num_os_windows >= MAX_CHILDREN) {
@@ -2282,7 +2567,7 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
         initial_window_size_py_callback = get_window_size;
     }
     glfwGetError(NULL); // clear any stale error
-    GLFWwindow *glfw_window = glfwCreateWindow(width, height, title, NULL, temp_window ? temp_window : common_context, lsc);
+    GLFWwindow *glfw_window = glfwCreateWindow(width, height, title_utf8, NULL, temp_window ? temp_window : common_context, lsc);
     initial_window_size_py_callback = NULL;
     if (temp_window) {
         glfwDestroyWindow(temp_window);
@@ -2305,7 +2590,8 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     PyObject *pret = PyObject_CallFunction(pre_show_callback, "N", native_window_handle(glfw_window));
     if (pret == NULL) return NULL;
     Py_DECREF(pret);
-    if (x != INT_MIN && y != INT_MIN) glfwSetWindowPos(glfw_window, x, y);
+    // Ignore positions that are not on any monitor, for example, because the monitor was disconnected
+    if (x != INT_MIN && y != INT_MIN && is_visible_on_a_monitor(x, y, width, height)) glfwSetWindowPos(glfw_window, x, y);
     if (!global_state.is_apple && !global_state.is_wayland && window_state != WINDOW_HIDDEN) glfwShowWindow(glfw_window, false);
     if (global_state.is_wayland || global_state.is_apple) {
         float n_xscale, n_yscale;
@@ -2334,6 +2620,8 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     OSWindow *w = add_os_window();
     w->handle = glfw_window;
     w->disallow_title_changes = disallow_override_title;
+    // A fixed title is never synced from the active window, so store it here
+    if (disallow_override_title) w->window_title = Py_NewRef(title);
     if (lsc != NULL) {
         w->is_layer_shell = true;
         w->hide_on_focus_loss = lsc->hide_on_focus_loss;
@@ -2374,6 +2662,7 @@ create_os_window(PyObject UNUSED *self, PyObject *args, PyObject *kw) {
     glfwSetCursorPosCallback(glfw_window, cursor_pos_callback);
     glfwSetCursorEnterCallback(glfw_window, cursor_enter_callback);
     glfwSetScrollCallback(glfw_window, scroll_callback);
+    glfwSetTouchCallback(glfw_window, touch_callback);
     glfwSetKeyboardCallback(glfw_window, key_callback);
 
     glfwSetDragSourceCallback(glfw_window, drag_source_callback);
@@ -2540,6 +2829,32 @@ dbus_user_notification_activated(uint32_t notification_id, int type, const char 
         case -1: stype = "capabilities"; break;
     }
     send_dbus_notification_event_to_python(stype, nid, action);
+}
+
+static PyObject *dbus_session_state_callback = NULL;
+
+static void
+dbus_session_state_changed(uint32_t state) {
+    if (dbus_session_state_callback) {
+        RAII_PyObject(ret, PyObject_CallFunction(dbus_session_state_callback, "k", (unsigned long)state));
+        if (!ret) PyErr_Print();
+    }
+}
+
+static PyObject *
+dbus_monitor_session_state(PyObject *self UNUSED, PyObject *callback) {
+    if (!PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "callback must be callable");
+        return NULL;
+    }
+    if (!glfwDBusMonitorSessionState) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to load glfwDBusMonitorSessionState, did you call glfw_init?");
+        return NULL;
+    }
+    Py_CLEAR(dbus_session_state_callback);
+    dbus_session_state_callback = Py_NewRef(callback);
+    if (glfwDBusMonitorSessionState(dbus_session_state_changed)) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
 }
 #endif
 
@@ -3034,6 +3349,29 @@ change_os_window_state(PyObject *self UNUSED, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *
+get_os_window_geometry(PyObject *self UNUSED, PyObject *args) {
+    // The geometry needed to re-create the OS Window, for fullscreen windows this is the geometry from before they were made fullscreen
+    id_type wid;
+    if (!PyArg_ParseTuple(args, "K", &wid)) return NULL;
+    OSWindow *w = os_window_for_id(wid);
+    if (!w || !w->handle || w->is_layer_shell) Py_RETURN_NONE;
+    int x = 0, y = 0, width = 0, height = 0, state = WINDOW_NORMAL;
+    glfwGetWindowSize(w->handle, &width, &height);
+    if (!global_state.is_wayland) glfwGetWindowPos(w->handle, &x, &y);
+    if (is_os_window_fullscreen(w)) {
+        state = WINDOW_FULLSCREEN;
+        if (w->before_fullscreen.is_set) {
+            width = w->before_fullscreen.w;
+            height = w->before_fullscreen.h;
+            x = w->before_fullscreen.x;
+            y = w->before_fullscreen.y;
+        }
+    } else if (glfwGetWindowAttrib(w->handle, GLFW_ICONIFIED)) state = WINDOW_MINIMIZED;
+    else if (glfwGetWindowAttrib(w->handle, GLFW_MAXIMIZED)) state = WINDOW_MAXIMIZED;
+    return Py_BuildValue("{si si si si si}", "x", x, "y", y, "width", width, "height", height, "state", state);
+}
+
 void
 request_window_attention(id_type kitty_window_id, bool audio_bell) {
     OSWindow *w = os_window_for_kitty_window(kitty_window_id);
@@ -3418,12 +3756,13 @@ dbus_send_notification(PyObject *self UNUSED, PyObject *args, PyObject *kw) {
     int timeout = -1, urgency = 1;
     unsigned int replaces = 0;
     GLFWDBUSNotificationData d = {0};
-    static const char *kwlist[] = {"app_name", "app_icon", "title", "body", "actions", "timeout", "urgency", "replaces", "category", "muted", NULL};
+    static const char *kwlist[] = {
+        "app_name", "app_icon", "title", "body", "actions", "timeout", "urgency", "replaces", "category", "muted", "desktop_entry", NULL};
     PyObject *actions = NULL;
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kw,
-            "ssssO!|iiIsp",
+            "ssssO!|iiIsps",
             (char **)kwlist,
             &d.app_name,
             &d.icon,
@@ -3435,7 +3774,8 @@ dbus_send_notification(PyObject *self UNUSED, PyObject *args, PyObject *kw) {
             &urgency,
             &replaces,
             &d.category,
-            &d.muted))
+            &d.muted,
+            &d.desktop_entry))
         return NULL;
     if (!glfwDBusUserNotify) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to load glfwDBusUserNotify, did you call glfw_init?");
@@ -3454,8 +3794,8 @@ dbus_send_notification(PyObject *self UNUSED, PyObject *args, PyObject *kw) {
             PyErr_SetString(PyExc_TypeError, "actions must be strings");
             return NULL;
         }
-        if (PyUnicode_GET_LENGTH(key) == 0 || PyUnicode_GET_LENGTH(value) == 0) {
-            PyErr_SetString(PyExc_TypeError, "actions must be non-empty strings");
+        if (PyUnicode_GET_LENGTH(key) == 0) {
+            PyErr_SetString(PyExc_TypeError, "action names must be non-empty strings");
             return NULL;
         }
         aclist[d.num_actions] = PyUnicode_AsUTF8(key);
@@ -3918,6 +4258,7 @@ static PyMethodDef module_methods[] = {
     METHODB(toggle_fullscreen, METH_VARARGS),
     METHODB(toggle_maximized, METH_VARARGS),
     METHODB(change_os_window_state, METH_VARARGS),
+    METHODB(get_os_window_geometry, METH_VARARGS),
     METHODB(glfw_window_hint, METH_VARARGS),
     METHODB(x11_display, METH_NOARGS),
     METHODB(wayland_compositor_data, METH_NOARGS),
@@ -3929,6 +4270,7 @@ static PyMethodDef module_methods[] = {
 #ifndef __APPLE__
     METHODB(dbus_close_notification, METH_VARARGS),
     METHODB(dbus_set_notification_callback, METH_O),
+    METHODB(dbus_monitor_session_state, METH_O),
     {"dbus_send_notification", (PyCFunction)(void (*)(void))(dbus_send_notification), METH_KEYWORDS | METH_VARARGS, NULL},
 #else
     {"cocoa_recreate_global_menu", (PyCFunction)py_recreate_global_menu, METH_NOARGS, ""},
@@ -3963,8 +4305,10 @@ cleanup_glfw(void) {
     Py_CLEAR(edge_spacing_func);
 #ifndef __APPLE__
     Py_CLEAR(dbus_notification_callback);
+    Py_CLEAR(dbus_session_state_callback);
     release_freetype_render_context(bold_render_ctx);
     release_freetype_render_context(normal_render_ctx);
+    release_freetype_render_context(csd_title_render_ctx);
 #endif
 }
 
