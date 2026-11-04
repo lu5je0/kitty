@@ -1563,6 +1563,11 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 @class KittyTitlebarTabView;
 @class KittyTitlebarNewTabButton;
 
+// AppKit exposes these selectors on macOS 27, but does not declare them in the SDK.
+@interface NSWindow (KittyTitlebarHeight)
+@property (nonatomic) CGFloat titlebarHeight;
+@end
+
 @interface KittyTitlebarTabBarView : NSView
 @property (nonatomic) unsigned long long os_window_id;
 @property (nonatomic, retain) KittyTitlebarNewTabButton *plusButton;
@@ -1571,6 +1576,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 @property (nonatomic) BOOL drop_was_internal;
 @property (nonatomic) CGFloat last_drag_x;
 @property (nonatomic) CGFloat last_tab_width;
+@property (nonatomic) CGFloat originalTitlebarHeight;
 - (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs draggedTab:(KittyTitlebarTabView*)dragged_tab dragIndex:(NSUInteger)drag_index;
 - (void)positionDraggedTabAtPoint:(NSPoint)p;
 @end
@@ -2188,6 +2194,11 @@ titlebar_tab_bar_view_for_window(NSWindow *window, bool create) {
     }
     if (!create) return nil;
     KittyTitlebarTabBarView *bar = [[KittyTitlebarTabBarView alloc] initWithFrame:NSZeroRect];
+    const CGFloat compactHeight = kTabHeight + 4;  // 2pt above and below the tabs
+    if ([window respondsToSelector:@selector(titlebarHeight)] && [window respondsToSelector:@selector(setTitlebarHeight:)] && window.titlebarHeight > compactHeight) {
+        bar.originalTitlebarHeight = window.titlebarHeight;
+        window.titlebarHeight = compactHeight;
+    }
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     [titlebarView addSubview:bar];
     [NSLayoutConstraint activateConstraints:@[
@@ -2208,6 +2219,7 @@ cocoa_update_titlebar_tabs(void *w, unsigned long long os_window_id, const Title
     KittyTitlebarTabBarView *bar = titlebar_tab_bar_view_for_window(window, count > 0);
     if (!bar) return;
     if (count == 0) {
+        if (bar.originalTitlebarHeight > 0) window.titlebarHeight = bar.originalTitlebarHeight;
         window.titleVisibility = NSWindowTitleVisible;
         if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
         [bar removeFromSuperview];
