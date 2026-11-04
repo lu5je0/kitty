@@ -6,7 +6,8 @@ deploy_macos() {
     local app_dst="/Applications/kitty.app"
 
     echo "Building $app_src ..."
-    ./dev.sh build
+    # Use the Apple toolchain for both kitty and Go/cgo, even with Nix first in PATH.
+    CC="${CC:-/usr/bin/clang}" ./dev.sh build
 
     if [[ ! -d "$app_src" ]]; then
         echo "Error: $app_src not found after build" >&2
