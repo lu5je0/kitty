@@ -1560,6 +1560,38 @@ titlebar_tab_color_from_rgb(unsigned int c) {
 
 static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.titlebar-tab";
 
+// Keep the fork's dark titlebar independent of AppKit's changing system material.
+@interface KittyTitlebarBackgroundView : NSView
+@end
+
+@implementation KittyTitlebarBackgroundView
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+- (void)refresh:(NSNotification *)notification {
+    (void)notification;
+    self.needsDisplay = YES;
+}
+- (void)viewWillMoveToWindow:(NSWindow *)window {
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc removeObserver:self];
+    if (window) {
+        [nc addObserver:self selector:@selector(refresh:) name:NSWindowDidBecomeKeyNotification object:window];
+        [nc addObserver:self selector:@selector(refresh:) name:NSWindowDidResignKeyNotification object:window];
+    }
+    [super viewWillMoveToWindow:window];
+}
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [super dealloc];
+}
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    // Explicit colors, terminal-background colors and light mode remain AppKit's.
+    if (OPT(macos_titlebar_color) != -2) return;
+    [titlebar_tab_color_from_rgb(self.window.isKeyWindow ? 0x393a39 : 0x2c2c2c) setFill];
+    NSRectFill(self.bounds);
+}
+@end
+
 @class KittyTitlebarTabView;
 @class KittyTitlebarNewTabButton;
 
@@ -1577,6 +1609,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 @property (nonatomic) CGFloat last_drag_x;
 @property (nonatomic) CGFloat last_tab_width;
 @property (nonatomic) CGFloat originalTitlebarHeight;
+@property (nonatomic, retain) KittyTitlebarBackgroundView *backgroundView;
 - (void)layoutTabsAnimated:(BOOL)animated initialLayoutForNewTabs:(NSArray<KittyTitlebarTabView*>*)new_tabs draggedTab:(KittyTitlebarTabView*)dragged_tab dragIndex:(NSUInteger)drag_index;
 - (void)positionDraggedTabAtPoint:(NSPoint)p;
 @end
@@ -1913,6 +1946,7 @@ static NSString *const KittyTitlebarTabPasteboardType = @"net.kovidgoyal.kitty.t
 
 - (void)dealloc {
     self.plusButton = nil;
+    self.backgroundView = nil;
     [super dealloc];
 }
 
@@ -2201,12 +2235,21 @@ titlebar_tab_bar_view_for_window(NSWindow *window, bool create) {
     }
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     [titlebarView addSubview:bar];
+    KittyTitlebarBackgroundView *background = [[KittyTitlebarBackgroundView alloc] initWithFrame:NSZeroRect];
+    background.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundView = background;
+    [titlebarView addSubview:background positioned:NSWindowBelow relativeTo:titlebarView.subviews[0]];
     [NSLayoutConstraint activateConstraints:@[
+        [background.topAnchor constraintEqualToAnchor:titlebarView.topAnchor],
+        [background.bottomAnchor constraintEqualToAnchor:titlebarView.bottomAnchor],
+        [background.leadingAnchor constraintEqualToAnchor:titlebarView.leadingAnchor],
+        [background.trailingAnchor constraintEqualToAnchor:titlebarView.trailingAnchor],
         [bar.topAnchor constraintEqualToAnchor:titlebarView.topAnchor],
         [bar.bottomAnchor constraintEqualToAnchor:titlebarView.bottomAnchor],
         [bar.leadingAnchor constraintEqualToAnchor:titlebarView.leadingAnchor constant:kTabBarLeftMargin],
         [bar.trailingAnchor constraintEqualToAnchor:titlebarView.trailingAnchor constant:-8],
     ]];
+    [background release];
     [bar release];
     window.titleVisibility = NSWindowTitleHidden;
     return bar;
@@ -2222,10 +2265,12 @@ cocoa_update_titlebar_tabs(void *w, unsigned long long os_window_id, const Title
         if (bar.originalTitlebarHeight > 0) window.titlebarHeight = bar.originalTitlebarHeight;
         window.titleVisibility = NSWindowTitleVisible;
         if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
+        [bar.backgroundView removeFromSuperview];
         [bar removeFromSuperview];
         return;
     }
     bar.os_window_id = os_window_id;
+    bar.backgroundView.needsDisplay = YES;
     window.titleVisibility = NSWindowTitleHidden;
     if (@available(macOS 11.0, *)) window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
     [bar updateWithTabs:tabs count:count];
